@@ -1,0 +1,85 @@
+name: Release Builds
+
+# Builds, signs, verifies and publishes the Windows release when a GitHub release is published.
+# Never publishes unsigned binaries: missing signing configuration fails the run before building.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload assets to
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build, sign, package (windows-x64)
+    runs-on: windows-latest
+    # The federated credential trusts this repository's `release` environment.
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - name: Check release tag and signing configuration
+        id: meta
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+          SIGNING_ENDPOINT: ${{ vars.SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ vars.SIGNING_ACCOUNT }}
+          SIGNING_PROFILE: ${{ vars.SIGNING_PROFILE }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid release tag' }
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ("v$version" -ne $tag) { throw "Cargo.toml version v$version does not match the tag $tag" }
+          $missing = @('SIGNING_ENDPOINT', 'SIGNING_ACCOUNT', 'SIGNING_PROFILE',
+                       'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID') |
+            Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) }
+          if ($missing) {
+            throw "Code signing is not configured; missing: $($missing -join ', '). " +
+                  'Set them under Settings > Environments > release (see docs/deployment.md#code-signing). ' +
+                  'Releases are never published unsigned.'
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "asset=dist/portglass-$tag-windows-x64.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build binaries
+        shell: pwsh
+        run: ./scripts/build.ps1 -Release -Stage build -Tag ${{ steps.meta.outputs.tag }}
+
+      - name: Sign and verify binaries
+        uses: ./.github/actions/sign-release
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          account: ${{ vars.SIGNING_ACCOUNT }}
+          profile: ${{ vars.SIGNING_PROFILE }}
+          expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
+
+      - name: Package signed release
+        shell: pwsh
+        run: ./scripts/build.ps1 -Release -Stage package -Tag ${{ steps.meta.outputs.tag }}
+
+      - name: Upload release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ASSET: ${{ steps.meta.outputs.asset }}
+        run: gh release upload $env:TAG $env:ASSET "$($env:ASSET).sha256" --clobber
