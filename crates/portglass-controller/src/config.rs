@@ -189,6 +189,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_documented_example_parses() {
+        let cfg: ControllerConfig =
+            toml::from_str(include_str!("../../../examples/controller.toml")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.probes.len(), 1);
+    }
+
+    #[test]
     fn template_parses_with_defaults() {
         let cfg: ControllerConfig = toml::from_str(&template("alice")).unwrap();
         assert_eq!(cfg.operator, "alice");

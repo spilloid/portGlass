@@ -294,6 +294,15 @@ mod tests {
     }
 
     #[test]
+    fn the_documented_example_parses() {
+        let text = include_str!("../../../examples/probe.toml");
+        let file: ProbeConfigFile = toml::from_str(text).unwrap();
+        let cfg = ProbeConfig::from_file(file, Path::new(".")).unwrap();
+        assert_eq!(cfg.controllers.len(), 1);
+        assert_eq!(cfg.allow.len(), 2);
+    }
+
+    #[test]
     fn unknown_keys_are_errors_not_silently_ignored() {
         let text = "[probe]\nname='x'\nlisten='127.0.0.1:1'\nallow_everything=true\n";
         assert!(toml::from_str::<ProbeConfigFile>(text).is_err());

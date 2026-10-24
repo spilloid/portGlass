@@ -36,10 +36,17 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ProbeConfig;
 use crate::policy;
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connections that have not finished authenticating. Bounds the cost of unauthenticated peers.
 const MAX_PENDING_HANDSHAKES: usize = 64;
+/// Per source address, so one host cannot hold every pending slot and lock everyone out.
+const MAX_PENDING_PER_IP: u32 = 8;
+/// Session opens and target checks a single control connection may have outstanding.
+const MAX_IN_FLIGHT_PER_CONTROL: usize = 4;
+/// A controller that stops reading is treated as gone rather than stalling the probe.
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Session {
     pub id: String,
@@ -73,6 +80,40 @@ struct Shared {
     audit: Arc<AuditLog>,
     shutdown: CancellationToken,
     auth_fail_window: Mutex<(Instant, u32)>,
+    pending_by_ip: Mutex<HashMap<std::net::IpAddr, u32>>,
+}
+
+/// Holds one per-IP pending-handshake slot until dropped.
+struct PendingSlot {
+    shared: Arc<Shared>,
+    ip: std::net::IpAddr,
+}
+
+impl PendingSlot {
+    fn take(shared: &Arc<Shared>, ip: std::net::IpAddr) -> Option<PendingSlot> {
+        let mut map = shared.pending_by_ip.lock().unwrap();
+        let n = map.entry(ip).or_insert(0);
+        if *n >= MAX_PENDING_PER_IP {
+            return None;
+        }
+        *n += 1;
+        Some(PendingSlot {
+            shared: shared.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for PendingSlot {
+    fn drop(&mut self) {
+        let mut map = self.shared.pending_by_ip.lock().unwrap();
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
 }
 
 impl Shared {
@@ -139,6 +180,38 @@ impl ProbeHandle {
         apply_config(&self.shared, config);
     }
 
+    /// Re-read the configuration file and apply it. An invalid file **fails closed**: every
+    /// controller and destination is revoked until the file is fixed. Returns whether it loaded.
+    pub fn reload_from(&self, path: &std::path::Path) -> bool {
+        match ProbeConfig::load(path) {
+            Ok(new) => {
+                if new.listen != self.config().listen {
+                    tracing::warn!("`listen` changed; restart the probe to apply it");
+                }
+                tracing::info!("configuration reloaded");
+                self.apply_config(new);
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    "configuration is invalid, revoking all access until it is fixed: {e:#}"
+                );
+                let mut locked = (*self.config()).clone();
+                locked.controllers.clear();
+                locked.allow.clear();
+                self.apply_config(locked);
+                self.shared.audit.record(
+                    "config_invalid",
+                    &[(
+                        "error",
+                        json!(format!("{e:#}").chars().take(500).collect::<String>()),
+                    )],
+                );
+                false
+            }
+        }
+    }
+
     pub fn active_sessions(&self) -> usize {
         self.shared.sessions.lock().unwrap().len()
     }
@@ -183,6 +256,7 @@ pub async fn start(
         audit,
         shutdown: CancellationToken::new(),
         auth_fail_window: Mutex::new((Instant::now(), 0)),
+        pending_by_ip: Mutex::new(HashMap::new()),
     });
     let server_config = tls::server_config(
         &identity,
@@ -220,6 +294,12 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, shared: Arc<S
                 continue;
             }
         };
+        let Some(slot) = PendingSlot::take(&shared, peer.ip()) else {
+            tracing::warn!(
+                "dropping connection from {peer}: too many pending handshakes from that address"
+            );
+            continue;
+        };
         let Ok(permit) = pending.clone().try_acquire_owned() else {
             tracing::warn!("dropping connection from {peer}: too many pending handshakes");
             continue;
@@ -240,11 +320,15 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, shared: Arc<S
                 }
             };
             drop(permit);
+            drop(slot);
             let (_, conn) = tls.get_ref();
             let alpn = conn.alpn_protocol().map(|a| a.to_vec());
             let Some(fp) = tls::peer_fingerprint(conn) else {
                 return;
             };
+            // Load-bearing: re-check the live allowlist after every handshake, independent of the
+            // TLS verifier (which also checks it, and which session resumption would skip — it is
+            // disabled in portglass_core::tls::server_config, and this check backs that up).
             let Some(operator) = shared.config().controller_name(&fp).map(str::to_owned) else {
                 return;
             };
@@ -274,11 +358,12 @@ async fn run_control<S>(
     let (tx, mut rx) = mpsc::channel::<ControlEvent>(64);
     let writer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            if write_frame(&mut wr, &ev).await.is_err() {
-                break;
+            match tokio::time::timeout(WRITE_TIMEOUT, write_frame(&mut wr, &ev)).await {
+                Ok(Ok(())) => {}
+                _ => break,
             }
         }
-        let _ = wr.shutdown().await;
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, wr.shutdown()).await;
     });
 
     let hello = tokio::time::timeout(
@@ -330,6 +415,14 @@ async fn run_control<S>(
         },
     );
     let cfg = shared.config();
+    // The controller may have been revoked while we waited for its hello, before this connection
+    // was registered where apply_config could see it.
+    if cfg.controller_name(&fp).is_none() {
+        shared.connections.lock().unwrap().remove(&conn_id);
+        drop(tx);
+        let _ = writer.await;
+        return;
+    }
     shared.audit.record(
         "controller_connected",
         &[
@@ -356,6 +449,8 @@ async fn run_control<S>(
         operator: operator.clone(),
         tx: tx.clone(),
         conn_id,
+        in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT_PER_CONTROL)),
+        denials: Mutex::new((Instant::now(), 0)),
     });
     let control_timeout = Duration::from_secs(cfg.limits.control_timeout_secs as u64);
     let reason = loop {
@@ -369,14 +464,12 @@ async fn run_control<S>(
             Err(_) => break "heartbeat_timeout",
             Ok(Err(FrameError::Closed)) => break "closed",
             Ok(Err(FrameError::Malformed(_))) | Ok(Err(FrameError::TooLarge(_))) => {
-                let _ = tx
-                    .send(ControlEvent::Error {
-                        code: ErrorCode::Unsupported,
-                        message: "unsupported or malformed command; this probe only opens, checks \
-                                  and closes forwarding sessions"
-                            .into(),
-                    })
-                    .await;
+                let _ = tx.try_send(ControlEvent::Error {
+                    code: ErrorCode::Unsupported,
+                    message: "unsupported or malformed command; this probe only opens, checks \
+                              and closes forwarding sessions"
+                        .into(),
+                });
                 shared.audit.record(
                     "command_rejected",
                     &[
@@ -390,12 +483,10 @@ async fn run_control<S>(
             Ok(Err(_)) => break "io_error",
             Ok(Ok(req)) => {
                 if let Err(why) = handle_request(&ctx, req).await {
-                    let _ = tx
-                        .send(ControlEvent::Error {
-                            code: ErrorCode::ProtocolViolation,
-                            message: why.into(),
-                        })
-                        .await;
+                    let _ = tx.try_send(ControlEvent::Error {
+                        code: ErrorCode::ProtocolViolation,
+                        message: why.into(),
+                    });
                     break "protocol_violation";
                 }
             }
@@ -440,6 +531,15 @@ struct ControlCtx {
     operator: String,
     tx: mpsc::Sender<ControlEvent>,
     conn_id: u64,
+    in_flight: Arc<Semaphore>,
+    denials: Mutex<(Instant, u32)>,
+}
+
+impl ControlCtx {
+    /// Send an event; a controller that stops reading for SEND_TIMEOUT is treated as gone.
+    async fn send(&self, ev: ControlEvent) -> bool {
+        self.tx.send_timeout(ev, SEND_TIMEOUT).await.is_ok()
+    }
 }
 
 impl Session {
@@ -453,20 +553,37 @@ async fn handle_request(ctx: &Arc<ControlCtx>, req: ControlRequest) -> Result<()
     match req {
         ControlRequest::Hello { .. } => return Err("hello sent twice"),
         ControlRequest::Ping { nonce } => {
-            let _ = ctx.tx.send(ControlEvent::Pong { nonce }).await;
+            if !ctx.send(ControlEvent::Pong { nonce }).await {
+                return Err("the controller stopped reading");
+            }
         }
         ControlRequest::OpenSession {
             request_id,
             target,
             ttl_secs,
         } => {
+            let Ok(permit) = ctx.in_flight.clone().try_acquire_owned() else {
+                if !ctx
+                    .send(ControlEvent::SessionRejected {
+                        request_id,
+                        code: ErrorCode::TooManySessions,
+                        message: "too many requests in progress; wait for one to finish".into(),
+                    })
+                    .await
+                {
+                    return Err("the controller stopped reading");
+                }
+                return Ok(());
+            };
             let ctx = ctx.clone();
-            tokio::spawn(async move { open_session(&ctx, request_id, target, ttl_secs).await });
+            tokio::spawn(async move {
+                open_session(&ctx, request_id, target, ttl_secs).await;
+                drop(permit);
+            });
         }
         ControlRequest::CheckTarget { session_id } => {
             let Some(session) = owned_session(ctx, &session_id) else {
-                let _ = ctx
-                    .tx
+                if !ctx
                     .send(ControlEvent::TargetStatus {
                         session_id,
                         reachable: false,
@@ -474,11 +591,19 @@ async fn handle_request(ctx: &Arc<ControlCtx>, req: ControlRequest) -> Result<()
                         code: Some(ErrorCode::SessionNotFound),
                         message: Some("no such session".into()),
                     })
-                    .await;
+                    .await
+                {
+                    return Err("the controller stopped reading");
+                }
+                return Ok(());
+            };
+            // At most a few checks at once; extra checks are simply skipped.
+            let Ok(permit) = ctx.in_flight.clone().try_acquire_owned() else {
                 return Ok(());
             };
             let ctx = ctx.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let timeout =
                     Duration::from_secs(ctx.shared.config().limits.connect_timeout_secs as u64);
                 let started = Instant::now();
@@ -498,7 +623,7 @@ async fn handle_request(ctx: &Arc<ControlCtx>, req: ControlRequest) -> Result<()
                         message: Some(message),
                     },
                 };
-                let _ = ctx.tx.send(ev).await;
+                ctx.send(ev).await;
             });
         }
         ControlRequest::CloseSession { session_id } => {
@@ -527,18 +652,29 @@ async fn open_session(
     ttl_secs: u32,
 ) {
     let cfg = ctx.shared.config();
-    let requested = target.to_string();
+    // The target string is controller-supplied: bound what it can put in the audit log.
+    let requested: String = target.to_string().chars().take(300).collect();
     let reject = |code: ErrorCode, message: String| {
-        ctx.shared.audit.record(
-            "session_denied",
-            &[
-                ("operator", json!(ctx.operator)),
-                ("fingerprint", json!(ctx.fp.to_string())),
-                ("target", json!(requested)),
-                ("code", json!(code.as_str())),
-                ("message", json!(message)),
-            ],
-        );
+        let audit = {
+            let mut w = ctx.denials.lock().unwrap();
+            if w.0.elapsed() > Duration::from_secs(60) {
+                *w = (Instant::now(), 0);
+            }
+            w.1 += 1;
+            w.1 <= 30
+        };
+        if audit {
+            ctx.shared.audit.record(
+                "session_denied",
+                &[
+                    ("operator", json!(ctx.operator)),
+                    ("fingerprint", json!(ctx.fp.to_string())),
+                    ("target", json!(requested)),
+                    ("code", json!(code.as_str())),
+                    ("message", json!(message)),
+                ],
+            );
+        }
         ControlEvent::SessionRejected {
             request_id,
             code,
@@ -547,13 +683,11 @@ async fn open_session(
     };
 
     if ttl_secs == 0 {
-        let _ = ctx
-            .tx
-            .send(reject(
-                ErrorCode::InvalidRequest,
-                "ttl must be positive".into(),
-            ))
-            .await;
+        ctx.send(reject(
+            ErrorCode::InvalidRequest,
+            "ttl must be positive".into(),
+        ))
+        .await;
         return;
     }
     let ttl = ttl_secs.min(cfg.limits.max_session_ttl_secs);
@@ -561,7 +695,7 @@ async fn open_session(
     let (addr, label) = match policy::authorize(&cfg.allow, &target, Duration::from_secs(5)).await {
         Ok(x) => x,
         Err(d) => {
-            let _ = ctx.tx.send(reject(d.code, d.message)).await;
+            ctx.send(reject(d.code, d.message)).await;
             return;
         }
     };
@@ -571,7 +705,7 @@ async fn open_session(
     match connect_target(addr, connect_timeout).await {
         Ok(stream) => drop(stream),
         Err((code, message)) => {
-            let _ = ctx.tx.send(reject(code, message)).await;
+            ctx.send(reject(code, message)).await;
             return;
         }
     }
@@ -631,7 +765,7 @@ async fn open_session(
         }
     };
     if let Some((code, message)) = refused {
-        let _ = ctx.tx.send(reject(code, message)).await;
+        ctx.send(reject(code, message)).await;
         return;
     }
 
@@ -658,8 +792,7 @@ async fn open_session(
         }
     });
 
-    let _ = ctx
-        .tx
+    let delivered = ctx
         .send(ControlEvent::SessionOpened {
             request_id,
             session_id: id,
@@ -669,6 +802,10 @@ async fn open_session(
             connect_ms,
         })
         .await;
+    if !delivered {
+        // Nobody will ever use it; don't leave it open until its TTL.
+        end_session(&ctx.shared, &session, EndReason::ControllerDisconnected);
+    }
 }
 
 /// End a session exactly once: cancel its streams, forget it, tell the controller, audit it.
@@ -682,10 +819,18 @@ fn end_session(shared: &Shared, session: &Arc<Session>, reason: EndReason) {
     }
     session.cancel.cancel();
     shared.sessions.lock().unwrap().remove(&session.id);
-    let _ = session.events.try_send(ControlEvent::SessionEnded {
+    let ended = ControlEvent::SessionEnded {
         session_id: session.id.clone(),
         reason,
-    });
+    };
+    // Never drop this notice just because the queue is momentarily full: the controller's
+    // status light depends on it.
+    if let Err(mpsc::error::TrySendError::Full(ev)) = session.events.try_send(ended) {
+        let tx = session.events.clone();
+        tokio::spawn(async move {
+            let _ = tx.send_timeout(ev, SEND_TIMEOUT).await;
+        });
+    }
     let (up, down) = session.counters.snapshot();
     shared.audit.record(
         "session_ended",

@@ -23,7 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use crate::browser::{self, BrowserHandle, BrowserInfo, WindowPlacement};
+use crate::browser::{self, BrowserHandle, BrowserInfo, ProcessScope, WindowPlacement};
 use crate::client::{ProbeLink, SessionGrant};
 use crate::config::{ControllerConfig, ProbeEntry};
 use crate::diag::{self, Diagnostic, Level, Scheme, SchemePref};
@@ -113,6 +113,8 @@ pub struct SessionView {
     pub active_conns: u32,
     pub total_conns: u64,
     pub failed_conns: u64,
+    /// Local connections refused because they did not come from the session browser.
+    pub refused_conns: u64,
     pub last_stream_error: Option<String>,
     pub rtt_ms: Option<u32>,
     pub target_reachable: Option<bool>,
@@ -207,7 +209,38 @@ struct Stats {
     active: AtomicU32,
     total: AtomicU64,
     failed: AtomicU64,
+    refused: AtomicU64,
     last_error: Mutex<Option<String>>,
+    gate: Mutex<Gate>,
+}
+
+/// Which local processes may use the tunnel endpoint.
+enum Gate {
+    /// Only processes of the current session browser; none while it isn't running.
+    Browser(Option<ProcessScope>),
+    /// Any local process. Only when the technician explicitly ran without a session browser.
+    AnyLocal,
+}
+
+impl Default for Gate {
+    fn default() -> Self {
+        Gate::Browser(None)
+    }
+}
+
+impl Stats {
+    fn admits(&self, listener_port: u16, peer: std::net::SocketAddr) -> bool {
+        let scope = match &*self.gate.lock().unwrap() {
+            Gate::AnyLocal => return true,
+            Gate::Browser(None) => return false,
+            Gate::Browser(Some(scope)) => scope.clone(),
+        };
+        crate::local_peer::owning_pid(listener_port, peer).is_some_and(|pid| scope.contains(pid))
+    }
+
+    fn set_browser(&self, scope: Option<ProcessScope>) {
+        *self.gate.lock().unwrap() = Gate::Browser(scope);
+    }
 }
 
 enum End {
@@ -369,6 +402,7 @@ impl Controller {
                 active_conns: 0,
                 total_conns: 0,
                 failed_conns: 0,
+                refused_conns: 0,
                 last_stream_error: None,
                 rtt_ms: None,
                 target_reachable: None,
@@ -574,6 +608,9 @@ impl Controller {
             .local_addr()
             .expect("bound listener has an address");
         let stats = Arc::new(Stats::default());
+        if !self.options.launch_browser {
+            *stats.gate.lock().unwrap() = Gate::AnyLocal;
+        }
         let tunnel = cancel.child_token();
         tokio::spawn(accept_loop(
             listener,
@@ -592,6 +629,18 @@ impl Controller {
             local.port(),
         );
         let mut diagnostics = report.items.clone();
+        if !self.options.launch_browser {
+            diagnostics.push(Diagnostic {
+                level: Level::Warn,
+                title: "Any program on this PC can use the tunnel".into(),
+                text: format!(
+                    "You started this session without the PortGlass browser, so 127.0.0.1:{} \
+                     accepts connections from any local program until the session ends.",
+                    local.port()
+                ),
+                suggestion: None,
+            });
+        }
         if !self.config.browser.preserve_address {
             if let Some(loc) = &report.self_redirect {
                 diagnostics.push(Diagnostic {
@@ -620,8 +669,11 @@ impl Controller {
         }
         let mut browser_handle = None;
         if self.options.launch_browser {
-            match self.launch_browser(&grant.session_id, &url, rules.as_deref()).await {
-                Ok(b) => browser_handle = Some(b),
+            match self.launch_browser(&url, rules.as_deref()).await {
+                Ok(b) => {
+                    stats.set_browser(Some(b.scope.clone()));
+                    browser_handle = Some(b);
+                }
                 Err(e) => diagnostics.push(Diagnostic {
                     level: Level::Warn,
                     title: "The session browser didn't start".into(),
@@ -727,16 +779,17 @@ impl Controller {
 
     async fn launch_browser(
         &self,
-        session_id: &str,
         url: &str,
         rules: Option<&str>,
     ) -> anyhow::Result<BrowserHandle> {
+        // The profile directory is named by the controller, never by anything the probe sent.
+        let profile_name = hex::encode(portglass_core::random_bytes::<16>());
         let exe = browser::find_chrome(&self.config.browser).ok_or_else(|| {
             anyhow::anyhow!("Google Chrome was not found (set [browser] path in controller.toml)")
         })?;
         BrowserHandle::launch(
             &exe,
-            session_id,
+            &profile_name,
             url,
             rules,
             &self.options.browser_window,
@@ -834,6 +887,10 @@ impl Controller {
                 }
             };
             tokio::select! {
+                // Ending the session must win over anything its own teardown makes ready (the
+                // heartbeat task exiting, the browser closing); otherwise a deliberate close can
+                // be misreported as a failure.
+                biased;
                 _ = cancel.cancelled() => return End::Closed("closed by technician"),
                 _ = closed.cancelled() => {
                     return End::Failed(Failure::new(
@@ -866,12 +923,19 @@ impl Controller {
                         "Connect again.",
                     )),
                 },
-                r = ping_rx.recv() => match r.flatten() {
-                    Some(rtt) => {
+                r = ping_rx.recv() => match r {
+                    // The heartbeat task only stops when the session is ending.
+                    None => {
+                        if cancel.is_cancelled() {
+                            return End::Closed("closed by technician");
+                        }
+                        return End::Failed(Failure::internal("the heartbeat stopped unexpectedly"));
+                    }
+                    Some(Some(rtt)) => {
                         missed = 0;
                         self.set_session(|v| v.rtt_ms = Some(rtt));
                     }
-                    None => {
+                    Some(None) => {
                         missed += 1;
                         if missed >= 2 {
                             return End::Failed(Failure::new(
@@ -903,6 +967,7 @@ impl Controller {
                         v.active_conns = stats.active.load(Ordering::Relaxed);
                         v.total_conns = stats.total.load(Ordering::Relaxed);
                         v.failed_conns = stats.failed.load(Ordering::Relaxed);
+                        v.refused_conns = stats.refused.load(Ordering::Relaxed);
                         v.last_stream_error = error;
                         v.elapsed_secs = granted_at.elapsed().as_secs();
                         v.expires_in_secs = Some(remaining.as_secs());
@@ -923,8 +988,9 @@ impl Controller {
                             if let Some(old) = browser_handle.take() {
                                 old.close().await;
                             }
-                            match self.launch_browser(&grant.session_id, url, rules).await {
+                            match self.launch_browser(url, rules).await {
                                 Ok(b) => {
+                                    stats.set_browser(Some(b.scope.clone()));
                                     exit_signal = Some(b.exit_signal());
                                     let info = b.info.clone();
                                     *browser_handle = Some(b);
@@ -993,14 +1059,23 @@ async fn accept_loop(
     cancel: CancellationToken,
     idle: Duration,
 ) {
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     loop {
-        let (local, _) = tokio::select! {
+        let (local, peer) = tokio::select! {
             _ = cancel.cancelled() => return,
             r = listener.accept() => match r {
                 Ok(x) => x,
                 Err(_) => continue,
             },
         };
+        // 127.0.0.1 is reachable by every process on this PC; only the session browser may use
+        // the tunnel. Refused connections are closed before anything reaches the probe.
+        if !stats.admits(port, peer) {
+            stats.refused.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("refused a local connection from {peer}: not the session browser");
+            drop(local);
+            continue;
+        }
         let _ = local.set_nodelay(true);
         let link = link.clone();
         let grant = grant.clone();

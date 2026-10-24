@@ -1,7 +1,6 @@
 //! End-to-end tests: a real probe, a real controller and a mock device, all on loopback.
 //! The browser is not launched here (see scripts/e2e-browser.ps1 for the real-browser check).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -741,5 +740,201 @@ async fn ui_server_refuses_foreign_hosts_origins_and_missing_tokens() {
     assert!(form.contains("415"), "{form}");
 }
 
-#[allow(dead_code)]
-fn unused(_: PathBuf) {}
+async fn read_eof_within(stream: &mut (impl AsyncReadExt + Unpin), secs: u64) -> bool {
+    let mut buf = [0u8; 64];
+    matches!(
+        tokio::time::timeout(Duration::from_secs(secs), stream.read(&mut buf)).await,
+        Ok(Ok(0)) | Ok(Err(_))
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_controller_cannot_use_a_session_even_with_its_token() {
+    let (bob, _, _) = Identity::generate("controller", "bob").unwrap();
+    let extra = format!(
+        "[[controller]]\nname = 'bob'\nfingerprint = '{}'\n",
+        bob.fingerprint
+    );
+    let h = Harness::with_extra_allow(&extra).await;
+    let alice = ProbeLink::connect(&h.entry, &h.ctl_id, "alice")
+        .await
+        .unwrap();
+    let grant = alice
+        .open_session(
+            &TargetSpec {
+                host: "127.0.0.1".into(),
+                port: h.mock.port(),
+            },
+            60,
+        )
+        .await
+        .unwrap();
+    let bob_link = ProbeLink::connect(&h.entry, &bob, "bob").await.unwrap();
+    let (code, _) = bob_link
+        .open_stream(&grant.session_id, &grant.stream_token)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        code,
+        Some(ErrorCode::SessionNotFound),
+        "the owner check must hold"
+    );
+    // Bob cannot close or check it either; alice's stream still works afterwards.
+    bob_link.close_session(&grant.session_id).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(alice
+        .open_stream(&grant.session_id, &grant.stream_token)
+        .await
+        .is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_per_session_stream_limit_is_enforced() {
+    let h = Harness::new().await; // max_streams_per_session = 16
+    let link = ProbeLink::connect(&h.entry, &h.ctl_id, "t").await.unwrap();
+    let grant = link
+        .open_session(
+            &TargetSpec {
+                host: "127.0.0.1".into(),
+                port: h.mock.port(),
+            },
+            60,
+        )
+        .await
+        .unwrap();
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        held.push(
+            link.open_stream(&grant.session_id, &grant.stream_token)
+                .await
+                .unwrap(),
+        );
+    }
+    let (code, _) = link
+        .open_stream(&grant.session_id, &grant.stream_token)
+        .await
+        .unwrap_err();
+    assert_eq!(code, Some(ErrorCode::TooManyStreams));
+    drop(held.pop());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        link.open_stream(&grant.session_id, &grant.stream_token)
+            .await
+            .is_ok(),
+        "a freed slot is reusable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expiry_and_revocation_cut_streams_that_are_already_open() {
+    let h = Harness::new().await;
+    let link = ProbeLink::connect(&h.entry, &h.ctl_id, "t").await.unwrap();
+    let target = TargetSpec {
+        host: "127.0.0.1".into(),
+        port: h.mock.port(),
+    };
+
+    let short = link.open_session(&target, 1).await.unwrap();
+    let mut s = link
+        .open_stream(&short.session_id, &short.stream_token)
+        .await
+        .unwrap();
+    assert!(
+        read_eof_within(&mut s, 5).await,
+        "expiry must cut an open stream"
+    );
+
+    let long = link.open_session(&target, 600).await.unwrap();
+    let mut s = link
+        .open_stream(&long.session_id, &long.stream_token)
+        .await
+        .unwrap();
+    h.probe()
+        .apply_config(probe_config(&h.ctl_id, &[1], "", h.dir.path()));
+    assert!(
+        read_eof_within(&mut s, 5).await,
+        "revocation must cut an open stream"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_address_cannot_hold_every_pending_handshake() {
+    let h = Harness::new().await;
+    let mut idle = Vec::new();
+    for _ in 0..8 {
+        idle.push(TcpStream::connect(h.probe().addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut ninth = TcpStream::connect(h.probe().addr).await.unwrap();
+    assert!(
+        read_eof_within(&mut ninth, 3).await,
+        "the ninth pending connection from one address is dropped"
+    );
+    drop(idle);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        ProbeLink::connect(&h.entry, &h.ctl_id, "t").await.is_ok(),
+        "slots are released"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invalid_config_file_fails_closed_and_recovers() {
+    let mock_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock = mock_listener.local_addr().unwrap();
+    tokio::spawn(portglass_mock_target::serve_http(mock_listener));
+    let dir = tempfile::tempdir().unwrap();
+    let (probe_id, _, _) = Identity::generate("probe", "p").unwrap();
+    let (ctl, _, _) = Identity::generate("controller", "alice").unwrap();
+    let path = dir.path().join("probe.toml");
+    let good = format!(
+        "[probe]\nname='p'\nlisten='127.0.0.1:0'\n[[controller]]\nname='alice'\nfingerprint='{}'\n\
+         [[allow]]\nnetwork='127.0.0.1'\nports=[{}]\n",
+        ctl.fingerprint,
+        mock.port()
+    );
+    std::fs::write(&path, &good).unwrap();
+    let probe = portglass_probe::start(
+        ProbeConfig::load(&path).unwrap(),
+        probe_id.clone(),
+        Arc::new(AuditLog::disabled()),
+    )
+    .await
+    .unwrap();
+    let entry = ProbeEntry {
+        name: "p".into(),
+        address: probe.addr.to_string(),
+        fingerprint: probe_id.fingerprint,
+    };
+    let link = ProbeLink::connect(&entry, &ctl, "t").await.unwrap();
+    let grant = link
+        .open_session(
+            &TargetSpec {
+                host: "127.0.0.1".into(),
+                port: mock.port(),
+            },
+            600,
+        )
+        .await
+        .unwrap();
+    let mut s = link
+        .open_stream(&grant.session_id, &grant.stream_token)
+        .await
+        .unwrap();
+
+    // An administrator saves a broken file (here: a typo while editing).
+    std::fs::write(&path, good.replace("[[allow]]", "[[allow]\n")).unwrap();
+    assert!(!probe.reload_from(&path));
+    assert!(read_eof_within(&mut s, 5).await, "everything is revoked");
+    assert_eq!(probe.active_sessions(), 0);
+    let err = ProbeLink::connect(&entry, &ctl, "t")
+        .await
+        .err()
+        .expect("refused while broken");
+    assert_eq!(err.kind, FailureKind::AuthFailed);
+
+    // Fixing the file restores access.
+    std::fs::write(&path, &good).unwrap();
+    assert!(probe.reload_from(&path));
+    assert!(ProbeLink::connect(&entry, &ctl, "t").await.is_ok());
+}

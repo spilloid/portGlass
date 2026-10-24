@@ -90,16 +90,20 @@ fn never_allowed(ip: IpAddr) -> Option<&'static str> {
     }
 }
 
-/// Loopback and link-local (which includes cloud metadata at 169.254.169.254) are reachable only
-/// through a rule written specifically for them, never through a broad rule like 0.0.0.0/0.
+/// Ranges reachable only through a rule written specifically for them, never through a broad rule
+/// like 0.0.0.0/0: loopback, link-local (including cloud metadata at 169.254.169.254), and the
+/// other well-known cloud metadata / host-agent endpoints.
 fn special_range(ip: IpAddr) -> Option<IpNet> {
     let v4 = |a, b, c, d, p| IpNet::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), p).unwrap();
     let v6 = |s: &str, p| IpNet::new(IpAddr::V6(s.parse::<Ipv6Addr>().unwrap()), p).unwrap();
     [
         v4(127, 0, 0, 0, 8),
         v4(169, 254, 0, 0, 16),
+        v4(168, 63, 129, 16, 32),   // Azure WireServer
+        v4(100, 100, 100, 200, 32), // Alibaba Cloud metadata
         v6("::1", 128),
         v6("fe80::", 10),
+        v6("fd00:ec2::254", 128), // AWS IMDS over IPv6
     ]
     .into_iter()
     .find(|n| n.contains(&ip))
@@ -112,6 +116,18 @@ fn canonical(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// The IPv4 address carried inside a NAT64 (64:ff9b::/96) or IPv4-compatible (::a.b.c.d)
+/// address. Such addresses inherit the IPv4 address's restrictions, so `64:ff9b::7f00:1` cannot
+/// be used to reach 127.0.0.1 through an IPv6 rule.
+fn embedded_v4(ip: IpAddr) -> Option<Ipv4Addr> {
+    let IpAddr::V6(v6) = ip else { return None };
+    let s = v6.segments();
+    let tail = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+    let nat64 = s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0);
+    let compat = s[..6].iter().all(|x| *x == 0) && !v6.is_unspecified() && !v6.is_loopback();
+    (nat64 || compat).then_some(tail)
+}
+
 /// Is `ip:port` allowed? Returns the matching rule.
 pub fn check(rules: &[AllowRule], ip: IpAddr, port: u16) -> Result<&AllowRule, Denial> {
     let ip = canonical(ip);
@@ -121,13 +137,19 @@ pub fn check(rules: &[AllowRule], ip: IpAddr, port: u16) -> Result<&AllowRule, D
             "port 0 is not valid",
         ));
     }
-    if let Some(why) = never_allowed(ip) {
+    let embedded = embedded_v4(ip);
+    if let Some(why) =
+        never_allowed(ip).or_else(|| embedded.and_then(|v4| never_allowed(IpAddr::V4(v4))))
+    {
         return Err(Denial::new(
             ErrorCode::UnauthorizedTarget,
             format!("{ip} is {why} and can never be a destination"),
         ));
     }
-    let special = special_range(ip);
+    // An address embedding a special IPv4 address can only match a rule inside that IPv4 range,
+    // which an IPv6 rule never is: so it is denied.
+    let special =
+        special_range(ip).or_else(|| embedded.and_then(|v4| special_range(IpAddr::V4(v4))));
     let mut network_matched = false;
     for rule in rules {
         if !rule.network.contains(&ip) {
@@ -288,6 +310,30 @@ mod tests {
             assert!(check(&rules, ip(bad), 80).is_err(), "{bad}");
         }
         assert!(check(&rules, ip("10.0.0.1"), 80).is_ok());
+    }
+
+    #[test]
+    fn cloud_metadata_and_embedded_ipv4_forms_stay_special() {
+        let rules = [
+            rule("0.0.0.0/0", &[(1, 65535)]),
+            rule("::/0", &[(1, 65535)]),
+        ];
+        for bad in [
+            "168.63.129.16",
+            "100.100.100.200",
+            "fd00:ec2::254",
+            "64:ff9b::a9fe:a9fe", // NAT64 169.254.169.254
+            "64:ff9b::7f00:1",    // NAT64 127.0.0.1
+            "::127.0.0.1",        // IPv4-compatible loopback
+            "64:ff9b::e000:1",    // NAT64 multicast 224.0.0.1
+        ] {
+            assert!(check(&rules, ip(bad), 80).is_err(), "{bad}");
+        }
+        // Ordinary NAT64 destinations still work through an IPv6 rule.
+        assert!(check(&rules, ip("64:ff9b::c0a8:132"), 80).is_ok());
+        // And a rule written for the metadata address itself is honoured.
+        let exact = [rule("168.63.129.16/32", &[(80, 80)])];
+        assert!(check(&exact, ip("168.63.129.16"), 80).is_ok());
     }
 
     #[test]

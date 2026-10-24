@@ -14,6 +14,7 @@
 //! controller exiting for any reason — ends all of them.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -95,11 +96,12 @@ pub fn plan_navigation(
         }
         (format!("{}://{authority}/", scheme.as_str()), Some(rules))
     } else {
-        let rules = (cfg.isolation == Isolation::Strict)
-            .then(|| "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1".to_string());
+        // Without address mapping there is no resolver rule at all. (Isolating this mode with
+        // "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" would let the device's page reach every loopback
+        // service on this PC, so strict isolation requires preserve_address.)
         (
             format!("{}://127.0.0.1:{local_port}/", scheme.as_str()),
-            rules,
+            None,
         )
     }
 }
@@ -145,9 +147,21 @@ pub struct WindowPlacement {
     pub height: u32,
 }
 
+/// The set of processes belonging to one session browser (its Job Object). The tunnel admits
+/// only connections whose owning process is in this set.
+#[derive(Clone)]
+pub struct ProcessScope(std::sync::Weak<job::Job>);
+
+impl ProcessScope {
+    pub fn contains(&self, pid: u32) -> bool {
+        self.0.upgrade().is_some_and(|job| job.contains(pid))
+    }
+}
+
 /// A running session browser. Dropping it closes the browser and deletes its profile.
 pub struct BrowserHandle {
     pub info: BrowserInfo,
+    pub scope: ProcessScope,
     kill: Option<oneshot::Sender<()>>,
     exited: watch::Receiver<bool>,
     finished: Option<tokio::task::JoinHandle<()>>,
@@ -156,13 +170,22 @@ pub struct BrowserHandle {
 impl BrowserHandle {
     pub async fn launch(
         exe: &Path,
-        session_id: &str,
+        profile_name: &str,
         url: &str,
         resolver_rules: Option<&str>,
         window: &WindowPlacement,
         extra_args: &[String],
     ) -> Result<BrowserHandle> {
-        let profile = sessions_root().join(session_id);
+        // The name becomes a directory that is later deleted recursively: never let it be a path.
+        if profile_name.is_empty()
+            || profile_name.len() > 64
+            || !profile_name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            bail!("invalid browser profile name {profile_name:?}");
+        }
+        let profile = sessions_root().join(profile_name);
         if profile.exists() {
             std::fs::remove_dir_all(&profile).ok();
         }
@@ -178,6 +201,8 @@ impl BrowserHandle {
             .arg("--disable-background-networking")
             .arg("--disable-component-update")
             .arg("--disable-default-apps")
+            // Device traffic must go through the tunnel, never a system proxy or PAC file.
+            .arg("--no-proxy-server")
             .arg(format!("--window-position={},{}", window.x, window.y))
             .arg(format!("--window-size={},{}", window.width, window.height));
         if let Some(rules) = resolver_rules {
@@ -189,19 +214,27 @@ impl BrowserHandle {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
 
-        let job = job::Job::kill_on_close();
+        // Start Chrome suspended, put it in the job, then let it run: every process it ever
+        // starts is then inside the job, which is both how it is cleaned up and how the tunnel
+        // recognizes its connections. Without containment, refuse to launch.
+        let job =
+            Arc::new(job::Job::kill_on_close().context("creating a job object for the browser")?);
+        #[cfg(windows)]
+        cmd.creation_flags(job::CREATE_SUSPENDED);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("starting {}", exe.display()))?;
         let pid = child.id();
-        let in_job = match (&job, child.raw_handle()) {
-            (Some(job), Some(handle)) => job.assign(handle),
+        let contained = match (child.raw_handle(), pid) {
+            (Some(handle), Some(pid)) => job.assign(handle) && job::resume(pid),
             _ => false,
         };
-        if !in_job {
-            tracing::warn!("could not place the browser (pid {pid:?}) in a job object");
+        if !contained {
+            let _ = child.kill().await;
+            bail!("could not contain the browser process in a job object");
         }
-        tracing::debug!("session browser pid {pid:?} started, in job: {in_job}");
+        tracing::debug!("session browser pid {pid:?} started in its job");
+        let scope = ProcessScope(Arc::downgrade(&job));
 
         let info = BrowserInfo {
             executable: exe.display().to_string(),
@@ -217,7 +250,7 @@ impl BrowserHandle {
                     tracing::debug!("session browser pid {pid:?} exited: {status:?}");
                 }
                 _ = kill_rx => {
-                    if let Some(job) = &job { job.terminate(); }
+                    job.terminate();
                     let killed = child.kill().await;
                     tracing::debug!("session browser pid {pid:?} terminated: {killed:?}");
                     // Belt and braces: if anything of that process tree is still alive, end it.
@@ -251,6 +284,7 @@ impl BrowserHandle {
         }
         Ok(BrowserHandle {
             info,
+            scope,
             kill: Some(kill_tx),
             exited: exit_rx,
             finished: Some(finished),
@@ -319,12 +353,50 @@ pub async fn launch_app_window(
 #[cfg(windows)]
 mod job {
     use std::os::windows::io::RawHandle;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenThread, ResumeThread, PROCESS_QUERY_LIMITED_INFORMATION,
+        THREAD_SUSPEND_RESUME,
+    };
+
+    pub const CREATE_SUSPENDED: u32 = windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    /// Resume every thread of a process started with CREATE_SUSPENDED.
+    pub fn resume(pid: u32) -> bool {
+        // SAFETY: documented Toolhelp/thread APIs; every handle opened here is closed here.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0;
+            let mut ok = Thread32First(snap, &mut entry) != 0;
+            while ok {
+                if entry.th32OwnerProcessID == pid {
+                    let t = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !t.is_null() {
+                        if ResumeThread(t) != u32::MAX {
+                            resumed += 1;
+                        }
+                        CloseHandle(t);
+                    }
+                }
+                ok = Thread32Next(snap, &mut entry) != 0;
+            }
+            CloseHandle(snap);
+            resumed > 0
+        }
+    }
 
     pub struct Job(HANDLE);
     // The handle is an owned kernel object handle, usable from any thread.
@@ -366,6 +438,21 @@ mod job {
                 TerminateJobObject(self.0, 0);
             }
         }
+
+        /// Is process `pid` in this job (directly or through a nested job Chrome created)?
+        pub fn contains(&self, pid: u32) -> bool {
+            // SAFETY: the process handle is opened with query rights only and closed here.
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if h.is_null() {
+                    return false;
+                }
+                let mut result = 0;
+                let ok = IsProcessInJob(h, self.0, &mut result);
+                CloseHandle(h);
+                ok != 0 && result != 0
+            }
+        }
     }
 
     impl Drop for Job {
@@ -389,6 +476,12 @@ mod job {
             false
         }
         pub fn terminate(&self) {}
+        pub fn contains(&self, _: u32) -> bool {
+            false
+        }
+    }
+    pub fn resume(_: u32) -> bool {
+        false
     }
 }
 
@@ -409,13 +502,48 @@ mod tests {
         let (url, _) = plan_navigation(&cfg, Scheme::Https, "printer.lan", 8443, 5000);
         assert_eq!(url, "https://printer.lan:8443/");
 
-        let open = BrowserConfig {
-            isolation: Isolation::Open,
-            preserve_address: false,
-            ..BrowserConfig::default()
+        // Without address mapping there are no resolver rules, whatever the isolation setting:
+        // "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" would expose every loopback port to the page.
+        for isolation in [Isolation::Open, Isolation::Strict] {
+            let plain = BrowserConfig {
+                isolation,
+                preserve_address: false,
+                ..BrowserConfig::default()
+            };
+            let (url, rules) = plan_navigation(&plain, Scheme::Http, "192.168.1.50", 80, 5000);
+            assert_eq!(url, "http://127.0.0.1:5000/");
+            assert!(rules.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_names_can_never_be_paths() {
+        let window = WindowPlacement {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
         };
-        let (url, rules) = plan_navigation(&open, Scheme::Http, "192.168.1.50", 80, 5000);
-        assert_eq!(url, "http://127.0.0.1:5000/");
-        assert!(rules.is_none());
+        for bad in [
+            "..\\..\\Documents",
+            "C:\\Users\\x",
+            "a/b",
+            "",
+            "UPPER",
+            "..",
+            "x y",
+        ] {
+            let r = BrowserHandle::launch(
+                Path::new("nonexistent.exe"),
+                bad,
+                "about:blank",
+                None,
+                &window,
+                &[],
+            )
+            .await;
+            let msg = r.err().expect("must refuse").to_string();
+            assert!(msg.contains("invalid browser profile name"), "{bad}: {msg}");
+        }
     }
 }

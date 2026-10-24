@@ -70,6 +70,10 @@ pub fn server_config(
         .with_client_cert_verifier(Arc::new(verifier))
         .with_single_cert(vec![identity.cert.clone()], identity.key.clone_key())?;
     config.alpn_protocols = alpn.iter().map(|a| a.to_vec()).collect();
+    // No session resumption: a resumed TLS session skips the client-certificate verifier, and the
+    // allowlist must be consulted on every connection so revocation is immediate.
+    config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
     Ok(config)
 }
 

@@ -8,5 +8,6 @@ pub mod client;
 pub mod config;
 pub mod diag;
 pub mod failure;
+pub mod local_peer;
 pub mod session;
 pub mod ui;

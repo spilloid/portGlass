@@ -235,7 +235,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(1500), sent).await;
         let forwarded = counters.snapshot().0;
         assert!(
-            forwarded < 64 * 1024 * 1024,
+            forwarded < 16 * 1024 * 1024,
             "bridge forwarded {forwarded} bytes to a peer that never reads"
         );
     }

@@ -272,6 +272,34 @@ async fn real_browser_session_through_the_tunnel() {
         .await;
     assert_eq!(other_port, json!("blocked"));
 
+    // 5. The tunnel endpoint serves only the session browser: this test process is refused.
+    let local = ctrl.snapshot().session.unwrap().local_addr.unwrap();
+    let mut intruder = TcpStream::connect(&local).await.unwrap();
+    let _ = intruder
+        .write_all(
+            format!("GET / HTTP/1.1\r\nHost: {mock}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await;
+    let mut got = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), intruder.read_to_end(&mut got)).await;
+    assert!(
+        got.is_empty(),
+        "a non-browser process must get nothing from the tunnel"
+    );
+    let mut refused = 0;
+    for _ in 0..30 {
+        refused = ctrl
+            .snapshot()
+            .session
+            .map(|s| s.refused_conns)
+            .unwrap_or(0);
+        if refused >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(refused >= 1, "the refusal is counted and shown");
+
     // Counters are published by a once-a-second sampler.
     let mut conns = 0;
     for _ in 0..30 {

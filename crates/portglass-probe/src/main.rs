@@ -311,23 +311,8 @@ async fn run(path: &Path) -> Result<()> {
                     continue;
                 }
                 last_mtime = now;
-                match ProbeConfig::load(path) {
-                    Ok(new) => {
-                        if new.listen != handle.config().listen {
-                            tracing::warn!("`listen` changed; restart the probe to apply it");
-                        }
-                        tracing::info!("configuration reloaded");
-                        handle.apply_config(new);
-                    }
-                    Err(e) => {
-                        // Fail closed: an unreadable policy permits nothing until it is fixed.
-                        tracing::error!("configuration is invalid, revoking all access until it is fixed: {e:#}");
-                        let mut locked = (*handle.config()).clone();
-                        locked.controllers.clear();
-                        locked.allow.clear();
-                        handle.apply_config(locked);
-                    }
-                }
+                handle.reload_from(path);
+
             }
         }
     }

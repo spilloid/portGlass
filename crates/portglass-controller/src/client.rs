@@ -218,13 +218,20 @@ impl ProbeLink {
                 expires_in_secs,
                 connect_ms,
                 ..
-            })) => Ok(SessionGrant {
+            })) if is_hex(&session_id, 32) && is_hex(&stream_token, 64) => Ok(SessionGrant {
                 session_id,
                 stream_token,
                 resolved_addr,
                 expires_in_secs,
                 connect_ms,
             }),
+            Ok(Ok(ControlEvent::SessionOpened { .. })) => Err(Failure::new(
+                FailureKind::Internal,
+                "The probe sent a malformed session",
+                "The session id or token was not in the expected format, so it was refused.",
+                "Check that the probe runs a matching PortGlass version. If it does, treat the \
+                 probe as untrusted until it is investigated.",
+            )),
             Ok(Ok(ControlEvent::SessionRejected { code, message, .. })) => {
                 Err(Failure::from_probe(code, &message, &target.to_string()))
             }
@@ -310,6 +317,14 @@ impl ProbeLink {
     pub fn own_fingerprint(&self) -> Fingerprint {
         self.own_fingerprint
     }
+}
+
+/// Everything a probe sends is untrusted input. Session ids and tokens are fixed-length
+/// lowercase hex, which also guarantees they can never act as a path or command fragment.
+pub fn is_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 impl Drop for ProbeLink {
@@ -514,4 +529,22 @@ async fn reader_task<R>(
         }
     }
     closed.cancel();
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn probe_supplied_ids_must_be_exact_lowercase_hex() {
+        use super::is_hex;
+        assert!(is_hex(&"a1".repeat(16), 32));
+        for bad in [
+            "..\\..\\Documents",
+            "C:\\x",
+            &"A1".repeat(16),
+            &"a1".repeat(17),
+            "",
+        ] {
+            assert!(!is_hex(bad, 32), "{bad}");
+        }
+    }
 }
