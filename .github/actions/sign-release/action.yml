@@ -1,0 +1,79 @@
+name: Sign and verify release files
+description: >
+  Signs dist/portglass.exe and dist/portglass-probe.exe with Azure Artifact Signing, then fails
+  unless every listed file carries a valid, timestamped signature from the expected certificate
+  profile. Shared by the release workflow and the signing check, so every signed file goes through
+  one signing path and one verification rule. Mirrors SpoolSmith's action of the same name.
+
+inputs:
+  client-id:
+    description: Client ID of the app registration trusted by the federated credential.
+    required: true
+  tenant-id:
+    description: Azure tenant ID.
+    required: true
+  subscription-id:
+    description: Azure subscription ID.
+    required: true
+  endpoint:
+    description: Regional Artifact Signing endpoint; must match the account's region.
+    required: true
+  account:
+    description: Artifact Signing account name.
+    required: true
+  profile:
+    description: Certificate profile name.
+    required: true
+  expected-subject:
+    description: Substring the signer subject must contain. Empty skips the subject check.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Needs `id-token: write` on the calling job for the OIDC exchange.
+    - name: Azure login
+      uses: azure/login@v3
+      with:
+        client-id: ${{ inputs.client-id }}
+        tenant-id: ${{ inputs.tenant-id }}
+        subscription-id: ${{ inputs.subscription-id }}
+
+    # The mock target is a test tool and is never shipped, so it is moved aside before signing.
+    - name: Keep only shipped binaries in dist
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force dist-unshipped | Out-Null
+        Get-ChildItem dist -Filter *.exe | Where-Object Name -notin 'portglass.exe', 'portglass-probe.exe' |
+          Move-Item -Destination dist-unshipped -Force
+
+    - name: Sign files
+      uses: azure/artifact-signing-action@v2
+      with:
+        endpoint: ${{ inputs.endpoint }}
+        signing-account-name: ${{ inputs.account }}
+        certificate-profile-name: ${{ inputs.profile }}
+        files-folder: ${{ github.workspace }}\dist
+        files-folder-filter: exe
+        file-digest: SHA256
+        # Signing certificates are valid for three days; without this countersignature the
+        # release stops verifying almost immediately.
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+        exclude-environment-credential: true
+        exclude-workload-identity-credential: true
+        exclude-managed-identity-credential: true
+        exclude-shared-token-cache-credential: true
+        exclude-visual-studio-credential: true
+        exclude-visual-studio-code-credential: true
+        exclude-azure-cli-credential: false
+        exclude-azure-powershell-credential: true
+        exclude-azure-developer-cli-credential: true
+        exclude-interactive-browser-credential: true
+
+    - name: Verify signatures
+      shell: pwsh
+      env:
+        EXPECTED_SUBJECT: ${{ inputs.expected-subject }}
+      run: ./scripts/verify-signature.ps1 -Files dist/portglass.exe, dist/portglass-probe.exe -ExpectedSubject $env:EXPECTED_SUBJECT

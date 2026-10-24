@@ -1,0 +1,10 @@
+/target
+/dist
+/scratch
+*.log
+*.jsonl
+# Local identities and configs are never committed. Examples live in examples/.
+*.key
+*.key.pem
+/portglass-data
+.DS_Store

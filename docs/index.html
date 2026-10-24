@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PortGlass — one remote web interface, nothing else</title>
+<meta name="description" content="PortGlass opens one authorized remote web interface, such as a printer's admin page, in a dedicated isolated browser over a mutually authenticated single-port tunnel. Windows, MIT.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='5' width='26' height='22' rx='5' fill='%23071426' stroke='%2300c2ff' stroke-width='2.5'/%3E%3Cpath d='M9 21 L19 11' stroke='%2300c2ff' stroke-width='2.5' stroke-linecap='round'/%3E%3Ccircle cx='22' cy='20' r='3' fill='%2322d07a'/%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #071426; --panel: #0c1f38; --line: #1d3a60; --text: #e8f2ff; --muted: #9ab0cc;
+  --accent: #00c2ff; --accent-ink: #00243a; --red: #ff5468; --amber: #ffb422; --green: #26d67f; --gray: #8b97aa;
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root { color-scheme: light; --bg: #eef3f9; --panel: #fff; --line: #d6e1ee; --text: #0b1b30; --muted: #4f6582;
+          --accent: #007fa8; --accent-ink: #fff; --red: #d42a43; --amber: #b86e00; --green: #0f9a55; --gray: #6b7789; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); }
+a { color: var(--accent); }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+nav { display: flex; align-items: center; gap: 10px; padding: 18px 0; }
+nav b { font-size: 18px; } nav .links { margin-left: auto; display: flex; gap: 18px; flex-wrap: wrap; font-size: 15px; }
+nav .links a { color: var(--muted); text-decoration: none; } nav .links a:hover { color: var(--text); }
+.hero { display: grid; grid-template-columns: 1.1fr .9fr; gap: 48px; align-items: center; padding: 40px 0 64px; }
+.hero h1 { font-size: clamp(34px, 5vw, 52px); line-height: 1.08; margin: 0 0 18px; letter-spacing: -.5px; }
+.hero p.lead { font-size: 19px; color: var(--muted); margin: 0 0 26px; }
+.typed { font: 600 22px var(--mono); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; display: inline-block; margin-bottom: 24px; }
+.typed .caret { display: inline-block; width: 2px; height: 1.1em; background: var(--accent); vertical-align: -3px; margin-left: 2px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.btn { display: inline-block; padding: 12px 18px; border-radius: 11px; font-weight: 600; text-decoration: none; border: 1px solid var(--line); color: var(--text); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.shot { width: 100%; max-width: 420px; justify-self: center; border-radius: 16px; border: 1px solid var(--line); box-shadow: 0 30px 60px rgba(0,0,0,.35); }
+section { padding: 56px 0; border-top: 1px solid var(--line); }
+h2 { font-size: 30px; margin: 0 0 10px; letter-spacing: -.3px; }
+.sub { color: var(--muted); margin: 0 0 30px; max-width: 720px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+.card h3 { margin: 0 0 6px; font-size: 18px; } .card p { margin: 0; color: var(--muted); font-size: 15px; }
+.states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.state img { width: 100%; border-radius: 12px; border: 1px solid var(--line); display: block; }
+.state .tag { display: flex; align-items: center; gap: 8px; font-weight: 600; margin: 10px 0 2px; }
+.state .dot { width: 12px; height: 12px; border-radius: 50%; }
+.state p { margin: 0; font-size: 14px; color: var(--muted); }
+pre { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow-x: auto; font: 14px/1.55 var(--mono); }
+.not li { margin: 4px 0; }
+footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
+@media (max-width: 860px) { .hero { grid-template-columns: 1fr; } .grid3 { grid-template-columns: 1fr; } .states { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 480px) { .states { grid-template-columns: 1fr; } nav .links { gap: 12px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="5" width="26" height="22" rx="5" fill="none" stroke="var(--accent)" stroke-width="2.4"/><path d="M9 21 L19 11" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round"/><circle cx="22" cy="20" r="3" fill="var(--green)"/></svg>
+    <b>PortGlass</b>
+    <div class="links">
+      <a href="#how">How it works</a><a href="#security">Security</a><a href="#start">Get started</a>
+      <a href="https://github.com/spilloid/portGlass">GitHub</a>
+    </div>
+  </nav>
+
+  <div class="hero">
+    <div>
+      <h1>One remote web interface. Nothing else.</h1>
+      <p class="lead">Pick a probe, type the device's address, and a dedicated browser opens on its real admin page — as if it were on your desk. No VPN, no remote desktop, no routing a whole network.</p>
+      <div class="typed">192.168.1.50:80<span class="caret"></span></div>
+      <div class="cta">
+        <a class="btn primary" href="#start">Get started</a>
+        <a class="btn" href="https://github.com/spilloid/portGlass/blob/main/docs/security-model.md">Read the security model</a>
+      </div>
+      <p class="sub" style="margin-top:18px;font-size:14px">v0.1.0 · Windows · MIT · for authorized IT support</p>
+    </div>
+    <img class="shot" src="img/controller-connected-dark.png" alt="The PortGlass window, connected: green status light, session details, live throughput and connection metrics">
+  </div>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="sub">A small probe on a computer at the remote site forwards one TCP port to one approved address, for you only, for a limited time. Everything between you and the probe is TLS 1.3 with both sides' certificates pinned.</p>
+    <div class="grid3">
+      <div class="card"><h3>1 · Authenticate</h3><p>Your controller and the probe prove who they are with certificates whose fingerprints each side pinned in advance — like SSH keys.</p></div>
+      <div class="card"><h3>2 · Ask for one target</h3><p>The probe checks the address and port against its own allowlist, pins the address, and test-connects before granting a session.</p></div>
+      <div class="card"><h3>3 · Browse it</h3><p>Your installed Chrome opens with a brand-new profile, pointed at the device's own address through the tunnel. Close it and everything is deleted.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Status you can trust</h2>
+    <p class="sub">The light follows the actual session: authentication, the probe's connection to the device, heartbeats, and a test connection to the device every ten seconds.</p>
+    <div class="states">
+      <div class="state"><img src="img/controller-idle-dark.png" alt="Red: not connected" loading="lazy"><div class="tag"><span class="dot" style="background:var(--red)"></span>Red</div><p>Disconnected — or the device stopped answering.</p></div>
+      <div class="state"><img src="img/controller-connected-dark.png" alt="Green: connected" loading="lazy"><div class="tag"><span class="dot" style="background:var(--green)"></span>Green</div><p>Connected. The device answers through the tunnel.</p></div>
+      <div class="state"><img src="img/controller-failed-dark.png" alt="Red with an explanation: the probe isn't allowed to reach that address" loading="lazy"><div class="tag"><span class="dot" style="background:var(--red)"></span>Red, with what to do</div><p>Every failure says what happened and how to fix it.</p></div>
+      <div class="state"><img src="img/controller-ended-dark.png" alt="Gray: session ended" loading="lazy"><div class="tag"><span class="dot" style="background:var(--gray)"></span>Gray</div><p>Session ended. Tunnel closed, browser data deleted.</p></div>
+    </div>
+    <p class="sub" style="margin-top:20px">Amber while it authenticates, connects and verifies the tunnel end to end.</p>
+  </div>
+</section>
+
+<section id="security">
+  <div class="wrap">
+    <h2>Small on purpose</h2>
+    <p class="sub">PortGlass minimizes suspicious behavior by minimizing what it can do — not by hiding.</p>
+    <div class="grid3">
+      <div class="card"><h3>The probe decides</h3><p>Deny by default. Loopback and cloud-metadata addresses need a rule written for them. Host names are resolved once and pinned. Edits to its policy apply in seconds.</p></div>
+      <div class="card"><h3>Sessions end, for real</h3><p>On close, expiry, revocation, a lost connection or a stopped probe, every forwarded connection is cut. The browser and its profile go with it.</p></div>
+      <div class="card"><h3>Audited, not recorded</h3><p>Both ends log who reached what, when, and how it ended. Never page content, passwords or tokens.</p></div>
+    </div>
+    <ul class="not" style="margin-top:26px;color:var(--muted)">
+      <li>No command execution, file transfer, scanning, or persistence in the probe.</li>
+      <li>No proxy, route, DNS or certificate changes; no virtual adapters.</li>
+      <li>Never your personal browser profile, and never a weakened browser.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <h2>Get started</h2>
+    <p class="sub">Technician PC with Google Chrome, and a Windows computer at the site. Both run without elevation.</p>
+<pre># Technician
+portglass init                                    # prints your fingerprint
+
+# At the site
+portglass-probe init --name front-office          # prints the probe's fingerprint
+portglass-probe authorize --name alice --fingerprint sha256:...
+portglass-probe allow --network 192.168.1.50 --ports 80,443
+portglass-probe run
+
+# Technician
+portglass probe add --name front-office --address 10.0.5.20:47100 --fingerprint sha256:...
+portglass</pre>
+    <p class="sub">Try it on one PC first: <code>./scripts/launch-demo.ps1</code> starts a mock printer, a probe and the controller.
+      Docs: <a href="https://github.com/spilloid/portGlass/blob/main/docs/architecture.md">architecture</a> ·
+      <a href="https://github.com/spilloid/portGlass/blob/main/docs/security-model.md">security model</a> ·
+      <a href="https://github.com/spilloid/portGlass/blob/main/docs/deployment.md">deployment, firewall &amp; EDR</a> ·
+      <a href="https://github.com/spilloid/portGlass/blob/main/docs/troubleshooting.md">troubleshooting</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">PortGlass v0.1.0 · MIT © 2026 Joseph Spillers · Direct mode only in this release; relay mode is designed, not built.</div>
+</footer>
+</body>
+</html>

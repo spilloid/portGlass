@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # STD-003 rule 1 and STD-007: the version the build declares is the one the docs state.
+  standards:
+    name: Version and docs consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: README and CHANGELOG state the Cargo version
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.+)"/\1/')
+          echo "Cargo version: $version"
+          grep -qF "v$version" README.md || { echo "README.md does not state v$version"; exit 1; }
+          latest=$(grep -m1 -E '^## [0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          [ "$latest" = "$version" ] || { echo "CHANGELOG.md latest entry $latest != $version"; exit 1; }
+      - name: PR template carries the required sections (STD-002)
+        run: |
+          f=.github/PULL_REQUEST_TEMPLATE.md
+          for h in '## What changed' '## How it was checked' '## Evidence'; do grep -q "^$h" "$f" || { echo "missing $h"; exit 1; }; done
+          grep -qi 'synthetic' "$f"
+
+  test:
+    name: Build, lint, test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --workspace
+      # Needs Google Chrome, which windows-latest runners have.
+      - name: Real-browser end-to-end
+        run: cargo test -p portglass-controller --test browser -- --ignored
+      - name: UI capture validation (STD-008)
+        run: cargo test -p portglass-controller --test ui_capture -- --ignored
+      - name: Keep UI captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-capture
+          path: target/ui-capture/*.png
+          if-no-files-found: ignore
+      - name: Release build (unsigned development artifact)
+        shell: pwsh
+        run: ./scripts/build.ps1 -Release -Tag "dev-$($env:GITHUB_SHA.Substring(0,7))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portglass-dev-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          retention-days: 14

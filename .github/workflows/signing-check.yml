@@ -1,0 +1,39 @@
+name: Signing check
+
+# Proves code signing works end to end without publishing anything: builds the release binaries,
+# signs them through the same composite action the release uses, and verifies the result. Run it
+# after configuring signing and before tagging a release. The signed binaries are kept as a
+# private artifact for one day.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  sign:
+    name: Sign and verify (no release)
+    runs-on: windows-latest
+    environment: release
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build binaries
+        shell: pwsh
+        run: ./scripts/build.ps1 -Release -Stage build -Tag signcheck
+      - name: Sign and verify binaries
+        uses: ./.github/actions/sign-release
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          account: ${{ vars.SIGNING_ACCOUNT }}
+          profile: ${{ vars.SIGNING_PROFILE }}
+          expected-subject: ${{ vars.SIGNING_EXPECTED_SUBJECT }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-binaries
+          path: dist/*.exe
+          retention-days: 1

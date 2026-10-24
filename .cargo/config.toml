@@ -1,0 +1,4 @@
+[build]
+# Host toolchain may be GNU; PortGlass ships MSVC binaries (system C runtime, rc.exe version
+# resources, conventional Authenticode signing). Override with --target for other platforms.
+target = "x86_64-pc-windows-msvc"

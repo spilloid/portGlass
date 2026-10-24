@@ -1,0 +1,19 @@
+# Example PortGlass Controller configuration. Fingerprints and addresses are fictional.
+# Create a real one with `portglass init`; it generates the identity too.
+
+operator = "alice"
+identity_dir = "identity"
+audit_log = "audit.jsonl"
+default_ttl_mins = 60
+idle_timeout_secs = 300
+
+[browser]
+# path = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+isolation = "strict"            # the session window can reach only the forwarded device
+preserve_address = true         # show the device's own address, mapped onto the tunnel
+end_session_on_close = true     # closing the session window ends the session
+
+[[probe]]
+name = "front-office"
+address = "10.0.5.20:47100"
+fingerprint = "sha256:FFFF:EEEE:DDDD:CCCC:BBBB:AAAA:9999:8888:7777:6666:5555:4444:3333:2222:1111:0000"
