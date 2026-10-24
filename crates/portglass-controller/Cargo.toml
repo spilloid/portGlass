@@ -1,0 +1,50 @@
+[package]
+name = "portglass-controller"
+description = "PortGlass Controller: opens an authorized remote web interface in a dedicated, isolated browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "portglass"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+hex.workspace = true
+axum.workspace = true
+portglass-proto.workspace = true
+portglass-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+portglass-probe.workspace = true
+portglass-mock-target = { path = "../portglass-mock-target" }
+tokio-tungstenite = "0.30"
+tempfile = "3"
+
+[build-dependencies]
+winresource = "0.1"
