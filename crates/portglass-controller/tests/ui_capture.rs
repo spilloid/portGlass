@@ -227,9 +227,75 @@ async fn controller_window_renders_cleanly_in_every_state() {
     cdp.call("Runtime.enable", json!({})).await;
     cdp.call("Log.enable", json!({})).await;
     cdp.call("Page.enable", json!({})).await;
+    let mut failures = Vec::new();
 
     let target = format!("{mock}");
-    let mut failures = Vec::new();
+    // First run: no probes yet, the setup card is the whole window.
+    {
+        let (fresh_id, _, _) = Identity::generate("controller", "new").unwrap();
+        let fresh_cfg: ControllerConfig = toml::from_str("operator='new'").unwrap();
+        let fresh = Controller::new(
+            fresh_cfg,
+            fresh_id,
+            Arc::new(AuditLog::disabled()),
+            Options {
+                launch_browser: false,
+                ..Options::default()
+            },
+        );
+        let fresh_server = portglass_controller::ui::serve(fresh).await.unwrap();
+        for theme in THEMES {
+            for (w, h, size) in SIZES {
+                cdp.call(
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false}),
+                )
+                .await;
+                cdp.call(
+                    "Emulation.setEmulatedMedia",
+                    json!({"features": [{"name": "prefers-color-scheme", "value": theme}]}),
+                )
+                .await;
+                cdp.call("Page.navigate", json!({"url": fresh_server.url}))
+                    .await;
+                let mut shown = false;
+                for _ in 0..60 {
+                    if cdp.eval("!!document.getElementById('setupCard') && !document.getElementById('setupCard').hidden && document.getElementById('formCard').hidden && document.getElementById('myFp').textContent.startsWith('sha256:')").await == json!(true) {
+                        shown = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let tag = format!("firstrun-{theme}-{size}");
+                if !shown {
+                    failures.push(format!("{tag}: setup card not shown"));
+                    continue;
+                }
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let overflow = cdp.eval("document.documentElement.scrollWidth - document.documentElement.clientWidth").await;
+                if overflow.as_i64().unwrap_or(1) > 0 {
+                    failures.push(format!("{tag}: page scrolls sideways by {overflow}px"));
+                }
+                let shot = cdp
+                    .call(
+                        "Page.captureScreenshot",
+                        json!({"format": "png", "captureBeyondViewport": true}),
+                    )
+                    .await;
+                let png = decode_base64(shot["data"].as_str().unwrap());
+                std::fs::write(out_dir.join(format!("{tag}.png")), &png).unwrap();
+                if publish && size == "min" {
+                    std::fs::create_dir_all(&docs_img).unwrap();
+                    std::fs::write(
+                        docs_img.join(format!("controller-firstrun-{theme}.png")),
+                        &png,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
     for state in ["idle", "connected", "failed", "ended"] {
         let expect = match state {
             "idle" => "red",

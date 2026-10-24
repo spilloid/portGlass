@@ -31,6 +31,9 @@ ipnet.workspace = true
 portglass-proto.workspace = true
 portglass-core.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+
 [dev-dependencies]
 tempfile = "3"
 

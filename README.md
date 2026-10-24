@@ -46,39 +46,26 @@ Details: [architecture](docs/architecture.md) · [security model and threat anal
 
 ## Quick start
 
-### 1. On the technician's PC
+**[Download PortGlass for Windows](https://github.com/spilloid/portGlass/releases/latest)** — one zip with both programs. No installer, no admin rights, no scripts.
+
+1. **On your PC**, unzip and double-click **`portglass.exe`**. The PortGlass window opens and shows *Add a probe* with your fingerprint.
+2. **On a computer at the remote site**, double-click **`portglass-probe.exe`**. It sets itself up and asks two questions in its window: paste your fingerprint (who may connect), and type the device to allow, like `192.168.1.50:80`. It then prints its own name, address and fingerprint. Allow it through Windows Firewall when asked — ideally only for your network.
+3. **Back in the PortGlass window**, enter what the probe printed and press **Add probe**. Pick it, type `192.168.1.50:80`, and press **Connect**. The light goes red → amber → green and the device's own page opens in a separate window. **End session** (or closing that window) closes the tunnel and deletes the browser's data.
+
+Everything can also be done from a terminal:
 
 ```powershell
-portglass init                       # creates your identity; prints your fingerprint
-```
-
-Send the printed fingerprint to the probe's administrator.
-
-### 2. On the remote computer (the probe)
-
-```powershell
-portglass-probe init --name front-office          # prints the probe's fingerprint
-portglass-probe authorize --name alice --fingerprint sha256:6A01:...   # the technician's
+portglass init                                    # identity; prints your fingerprint
+portglass-probe init --name front-office          # on the probe; prints its fingerprint
+portglass-probe authorize --name alice --fingerprint sha256:6A01:...
 portglass-probe allow --network 192.168.1.50 --ports 80,443 --label "Front office printer"
-portglass-probe run                                # visible console; Ctrl+C stops it
-```
-
-Allow the probe's port in Windows Firewall from technician addresses only — see
-[deployment](docs/deployment.md#windows-firewall), or `scripts/probe-firewall.ps1`.
-
-### 3. Back on the technician's PC
-
-```powershell
+portglass-probe run
 portglass probe add --name front-office --address 10.0.5.20:47100 --fingerprint sha256:6F59:...
-portglass                            # opens the PortGlass window
+portglass connect --probe front-office --target 192.168.1.50:80
 ```
 
-Pick the probe, type `192.168.1.50:80`, and press **Connect**. The light goes red → amber →
-green, and the printer's own page opens in a separate window. **End session** (or closing that
-window) closes the tunnel and deletes the browser's data.
-
-Prefer the terminal? `portglass connect --probe front-office --target 192.168.1.50:80`.
-
+For an administrator-managed install of the probe (Program Files, locked-down ProgramData,
+Start menu shortcut, scoped firewall rule) see [deployment](docs/deployment.md).
 ## Try it on one PC
 
 ```powershell

@@ -152,6 +152,20 @@ footer { margin-top: 16px; display: grid; gap: 4px; font-size: 12px; color: var(
 footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
 .toast { position: fixed; left: 50%; bottom: 16px; transform: translate(-50%, 30px); opacity: 0; transition: .25s; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); padding: 10px 14px; border-radius: 10px; max-width: calc(100vw - 32px); }
 .toast.show { transform: translate(-50%, 0); opacity: 1; }
+.setup ol { margin: 4px 0 0; padding-left: 20px; display: grid; gap: 14px; }
+.setup li { padding-left: 4px; }
+.setup li b { display: block; margin-bottom: 2px; }
+.setup code { font-family: var(--mono); font-size: 12.5px; }
+.fpbox { display: flex; gap: 8px; align-items: center; margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); }
+.fpbox code { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.inp { width: 100%; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); outline: none; }
+.inp:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.inp.mono { font-family: var(--mono); font-size: 13px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.grid2 .full { grid-column: 1 / -1; }
+.grid2 label span { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+.err { color: var(--red); font-size: 13px; margin-top: 8px; }
+.probe .rm { justify-self: end; grid-column: 2; font-size: 12px; }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -188,8 +202,28 @@ footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
     </div>
   </section>
 
+  <section class="card setup" id="setupCard" hidden>
+    <h2>Add a probe <span class="act"><button class="btn link" id="setupCancel">Cancel</button></span></h2>
+    <p class="muted" style="margin:0 0 6px" id="setupIntro">A probe is the small program on a computer at the remote site. Pair it with this PC in three steps.</p>
+    <ol>
+      <li><b>On the remote computer, run portglass-probe.exe</b>
+        <span class="muted">It sets itself up the first time and asks who may connect.</span></li>
+      <li><b>When it asks, paste your fingerprint</b>
+        <span class="muted">This tells the probe that this PC is allowed to connect.</span>
+        <div class="fpbox"><code id="myFp"></code><button class="btn small" id="copyFp2">Copy</button></div></li>
+      <li><b>Enter what the probe shows</b>
+        <div class="grid2">
+          <label><span>Name</span><input class="inp" id="pName" placeholder="front-office" autocomplete="off" spellcheck="false"></label>
+          <label><span>Address</span><input class="inp mono" id="pAddr" placeholder="10.0.5.20:47100" autocomplete="off" spellcheck="false"></label>
+          <label class="full"><span>Probe fingerprint</span><input class="inp mono" id="pFp" placeholder="sha256:6F59:29C4:..." autocomplete="off" spellcheck="false"></label>
+        </div>
+        <div class="err" id="pErr" hidden></div>
+        <button class="btn primary block" id="pAdd">Add probe</button></li>
+    </ol>
+  </section>
+
   <section class="card" id="formCard">
-    <h2>Probe <span class="act"><button class="btn link" id="recheck">Check probes</button></span></h2>
+    <h2>Probe <span class="act"><button class="btn link" id="addProbe">Add probe</button> · <button class="btn link" id="recheck">Check probes</button></span></h2>
     <div class="probes" id="probes"></div>
     <label class="field">
       <span>Device address and port</span>
@@ -254,7 +288,7 @@ const ICON = {
 };
 const LABEL = { red: "Disconnected", amber: "Connecting", green: "Connected", gray: "Session ended" };
 const ORDER = ["AUTHENTICATING", "CONNECTING", "VERIFYING", "READY"];
-let snap = null, selected = store.get("probe", ""), scheme = store.get("scheme", "auto"), lastFailedPhase = null, lastReq = null;
+let adding = false, snap = null, selected = store.get("probe", ""), scheme = store.get("scheme", "auto"), lastFailedPhase = null, lastReq = null;
 
 async function api(path, body) {
   const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-portglass-token": token }, body: JSON.stringify(body ?? {}) });
@@ -277,10 +311,7 @@ function probeChip(p) {
 }
 function renderProbes(s) {
   const el = $("probes");
-  if (!s.probes.length) {
-    el.innerHTML = `<div class="empty">No probes yet. Add one from a terminal:<br><code>portglass probe add --name office --address 10.0.5.20:47100 --fingerprint sha256:…</code></div>`;
-    return;
-  }
+  if (!s.probes.length) { el.innerHTML = ""; return; }
   if (!s.probes.some((p) => p.name === selected)) selected = s.probes[0].name;
   el.innerHTML = s.probes.map((p) => {
     const allow = p.policy ? p.policy.allow.map((a) => `${esc(a.network)} · ${esc(a.ports)}`).join("; ") : "";
@@ -289,8 +320,13 @@ function renderProbes(s) {
       <input type="radio" name="probe" value="${esc(p.name)}" ${p.name === selected ? "checked" : ""}>
       <div class="name">${esc(p.name)} ${probeChip(p)}</div>
       <div class="meta mono">${esc(p.address)}</div>
-      <div class="meta">${meta}</div></label>`;
+      <div class="meta">${meta}</div>
+      <button class="btn link rm" data-rm="${esc(p.name)}">Remove</button></label>`;
   }).join("");
+  el.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (confirm(`Remove probe ${b.dataset.rm}? You can add it again later.`)) await api("/api/probes/remove", { name: b.dataset.rm });
+  }));
   el.querySelectorAll("input").forEach((i) => i.addEventListener("change", () => { selected = i.value; store.set("probe", selected); renderProbes(snap); updateConnectLabel(); }));
 }
 function updateConnectLabel() {
@@ -374,7 +410,12 @@ function render(s) {
   document.title = `PortGlass — ${s.headline}`;
   renderSteps(s);
   const active = ["AUTHENTICATING", "CONNECTING", "VERIFYING", "READY", "CLOSING"].includes(s.phase);
-  $("formCard").hidden = active;
+  const noProbes = !s.probes.length;
+  $("formCard").hidden = active || noProbes;
+  $("setupCard").hidden = active || !(noProbes || adding);
+  $("setupCancel").hidden = noProbes;
+  $("setupIntro").hidden = !noProbes;
+  $("myFp").textContent = s.fingerprint;
   $("sessionCard").hidden = !(active && s.session);
   $("failCard").hidden = s.phase !== "FAILED";
   if (s.phase === "FAILED" && s.failure) { $("failHint").textContent = s.failure.hint; }
@@ -403,6 +444,21 @@ $("end").addEventListener("click", () => api("/api/disconnect"));
 $("showBrowser").addEventListener("click", () => api("/api/browser"));
 $("retry").addEventListener("click", () => { if (lastReq) api("/api/connect", lastReq); else api("/api/dismiss"); });
 $("dismiss").addEventListener("click", () => api("/api/dismiss"));
+$("addProbe").addEventListener("click", () => { adding = true; render(snap); $("pName").focus(); });
+$("setupCancel").addEventListener("click", () => { adding = false; $("pErr").hidden = true; render(snap); });
+$("copyFp2").addEventListener("click", async () => { try { await navigator.clipboard.writeText(snap.fingerprint); toast("Your fingerprint is copied. Paste it into the probe."); } catch { toast("Copy failed. Select the text instead."); } });
+$("pAdd").addEventListener("click", async () => {
+  const body = { name: $("pName").value, address: $("pAddr").value, fingerprint: $("pFp").value };
+  const r = await fetch("/api/probes/add", { method: "POST", headers: { "content-type": "application/json", "x-portglass-token": token }, body: JSON.stringify(body) });
+  if (r.ok) {
+    ["pName", "pAddr", "pFp"].forEach((id) => ($(id).value = ""));
+    $("pErr").hidden = true; adding = false; selected = body.name.trim(); store.set("probe", selected);
+    toast(`Added ${selected}. Checking it now.`);
+  } else {
+    let msg = r.statusText; try { const f = await r.json(); msg = `${f.detail} ${f.hint}`; } catch {}
+    $("pErr").textContent = msg; $("pErr").hidden = false;
+  }
+});
 $("recheck").addEventListener("click", () => api("/api/probes/check"));
 $("copyFp").addEventListener("click", async () => { try { await navigator.clipboard.writeText(snap.fingerprint); toast("Fingerprint copied"); } catch { toast("Copy failed — select the text below"); } });
 addEventListener("resize", () => { if (snap && snap.session) drawSpark(snap.session); });

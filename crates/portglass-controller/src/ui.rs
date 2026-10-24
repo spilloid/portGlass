@@ -53,6 +53,8 @@ pub async fn serve(ctrl: Arc<Controller>) -> anyhow::Result<UiServer> {
         .route("/api/dismiss", post(dismiss))
         .route("/api/browser", post(open_browser))
         .route("/api/probes/check", post(check_probes))
+        .route("/api/probes/add", post(add_probe))
+        .route("/api/probes/remove", post(remove_probe))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app);
     tokio::spawn(async move {
@@ -168,4 +170,33 @@ async fn check_probes(State(app): State<App>, _headers: HeaderMap, _body: Body) 
     let ctrl = app.ctrl.clone();
     tokio::spawn(async move { ctrl.check_probes().await });
     StatusCode::ACCEPTED
+}
+
+#[derive(serde::Deserialize)]
+struct AddProbe {
+    name: String,
+    address: String,
+    fingerprint: String,
+}
+
+async fn add_probe(State(app): State<App>, Json(req): Json<AddProbe>) -> Response {
+    match app
+        .ctrl
+        .add_probe(&req.name, &req.address, &req.fingerprint)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(f) => (StatusCode::BAD_REQUEST, Json(f)).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RemoveProbe {
+    name: String,
+}
+
+async fn remove_probe(State(app): State<App>, Json(req): Json<RemoveProbe>) -> Response {
+    match app.ctrl.remove_probe(&req.name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(f) => (StatusCode::BAD_REQUEST, Json(f)).into_response(),
+    }
 }
