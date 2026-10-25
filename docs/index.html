@@ -70,7 +70,8 @@ footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top:
       <p class="lead">Pick a probe, type the device's address, and a dedicated browser opens on its real admin page — as if it were on your desk. No VPN, no remote desktop, no routing a whole network.</p>
       <div class="typed">192.168.1.50:80<span class="caret"></span></div>
       <div class="cta">
-        <a class="btn primary" href="#start">Get started</a>
+        <a class="btn primary" href="https://github.com/spilloid/portGlass/releases/latest">Download for Windows</a>
+        <a class="btn" href="#start">How to start</a>
         <a class="btn" href="https://github.com/spilloid/portGlass/blob/main/docs/security-model.md">Read the security model</a>
       </div>
       <p class="sub" style="margin-top:18px;font-size:14px">v0.1.0 · Windows · MIT · for authorized IT support</p>
@@ -125,20 +126,13 @@ footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top:
 <section id="start">
   <div class="wrap">
     <h2>Get started</h2>
-    <p class="sub">Technician PC with Google Chrome, and a Windows computer at the site. Both run without elevation.</p>
-<pre># Technician
-portglass init                                    # prints your fingerprint
-
-# At the site
-portglass-probe init --name front-office          # prints the probe's fingerprint
-portglass-probe authorize --name alice --fingerprint sha256:...
-portglass-probe allow --network 192.168.1.50 --ports 80,443
-portglass-probe run
-
-# Technician
-portglass probe add --name front-office --address 10.0.5.20:47100 --fingerprint sha256:...
-portglass</pre>
-    <p class="sub">Try it on one PC first: <code>./scripts/launch-demo.ps1</code> starts a mock printer, a probe and the controller.
+    <p class="sub">You need Google Chrome on your PC and a Windows computer at the site. No installer, no admin rights.</p>
+    <div class="grid3">
+      <div class="card"><h3>1 · Open PortGlass</h3><p>Unzip the <a href="https://github.com/spilloid/portGlass/releases/latest">download</a> and double-click <b>portglass.exe</b>. It shows your fingerprint under <i>Add a probe</i>.</p></div>
+      <div class="card"><h3>2 · Start the probe</h3><p>At the site, double-click <b>portglass-probe.exe</b>. Paste your fingerprint and the device to allow, like 192.168.1.50:80. It prints its name, address and fingerprint.</p></div>
+      <div class="card"><h3>3 · Pair and connect</h3><p>Enter those in PortGlass, press <b>Add probe</b>, type the device address and press <b>Connect</b>. The device's page opens.</p></div>
+    </div>
+    <img class="shot" style="margin:28px auto 0;display:block" src="img/controller-firstrun-dark.png" alt="First run: the Add a probe card with your fingerprint and a form for the probe's details" loading="lazy">    <p class="sub" style="margin-top:24px">Prefer a terminal or a managed install? Every step has a command, and the probe has an administrator install script.
       Docs: <a href="https://github.com/spilloid/portGlass/blob/main/docs/architecture.md">architecture</a> ·
       <a href="https://github.com/spilloid/portGlass/blob/main/docs/security-model.md">security model</a> ·
       <a href="https://github.com/spilloid/portGlass/blob/main/docs/deployment.md">deployment, firewall &amp; EDR</a> ·

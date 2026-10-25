@@ -201,6 +201,22 @@ pub struct Controller {
     state: watch::Sender<Snapshot>,
     active: tokio::sync::Mutex<Option<Active>>,
     options: Options,
+    /// Pinned probes. Editable from the window; saved back to `config.source`.
+    probes: Mutex<Vec<ProbeEntry>>,
+}
+
+fn probe_view(p: &ProbeEntry) -> ProbeView {
+    ProbeView {
+        name: p.name.clone(),
+        address: p.address.clone(),
+        fingerprint: p.fingerprint.to_string(),
+        status: ProbeStatus::Unknown,
+        message: None,
+        authorized_as: None,
+        probe_version: None,
+        policy: None,
+        rtt_ms: None,
+    }
 }
 
 #[derive(Default)]
@@ -255,21 +271,7 @@ impl Controller {
         audit: Arc<AuditLog>,
         options: Options,
     ) -> Arc<Self> {
-        let probes = config
-            .probes
-            .iter()
-            .map(|p| ProbeView {
-                name: p.name.clone(),
-                address: p.address.clone(),
-                fingerprint: p.fingerprint.to_string(),
-                status: ProbeStatus::Unknown,
-                message: None,
-                authorized_as: None,
-                probe_version: None,
-                policy: None,
-                rtt_ms: None,
-            })
-            .collect();
+        let probes = config.probes.iter().map(probe_view).collect();
         let mut snap = Snapshot {
             phase: Phase::Disconnected,
             indicator: Indicator::Red,
@@ -290,6 +292,7 @@ impl Controller {
         derive_status(&mut snap);
         let (state, _) = watch::channel(snap);
         Arc::new(Controller {
+            probes: Mutex::new(config.probes.clone()),
             config,
             identity,
             audit,
@@ -297,6 +300,99 @@ impl Controller {
             active: tokio::sync::Mutex::new(None),
             options,
         })
+    }
+
+    fn probe_entry(&self, name: &str) -> Option<ProbeEntry> {
+        self.probes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
+    /// Pin a probe from the window. Validated, saved to controller.toml, then checked.
+    pub fn add_probe(
+        self: &Arc<Self>,
+        name: &str,
+        address: &str,
+        fingerprint: &str,
+    ) -> Result<(), Failure> {
+        let bad = |detail: String, hint: &str| {
+            Failure::new(
+                FailureKind::InvalidTarget,
+                "That probe can't be added",
+                detail,
+                hint,
+            )
+        };
+        let name = name.trim();
+        if name.is_empty() || name.len() > 64 {
+            return Err(bad(
+                "Give the probe a short name.".into(),
+                "For example: front-office.",
+            ));
+        }
+        let fingerprint: portglass_core::identity::Fingerprint =
+            fingerprint.trim().parse().map_err(|e| {
+                bad(
+                    format!("The fingerprint isn't valid: {e}"),
+                    "Copy it exactly from the probe's console (it starts with sha256:).",
+                )
+            })?;
+        let mut address = address.trim().to_string();
+        if !address.contains(':') {
+            address = format!("{address}:{}", portglass_proto::DEFAULT_PROBE_PORT);
+        }
+        let valid = address
+            .rsplit_once(':')
+            .is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok_and(|p| p != 0));
+        if !valid {
+            return Err(bad(
+                format!("{address:?} isn't host:port."),
+                "For example: 10.0.5.20:47100.",
+            ));
+        }
+        let entry = ProbeEntry {
+            name: name.to_string(),
+            address,
+            fingerprint,
+        };
+        {
+            let mut probes = self.probes.lock().unwrap();
+            if probes.iter().any(|p| p.name.eq_ignore_ascii_case(name)) {
+                return Err(bad(
+                    format!("A probe named {name:?} already exists."),
+                    "Pick another name, or remove the old one first.",
+                ));
+            }
+            probes.push(entry.clone());
+            self.persist(&probes)?;
+        }
+        self.update(|s| s.probes.push(probe_view(&entry)));
+        let me = self.clone();
+        tokio::spawn(async move { me.check_probe(entry).await });
+        Ok(())
+    }
+
+    pub fn remove_probe(&self, name: &str) -> Result<(), Failure> {
+        {
+            let mut probes = self.probes.lock().unwrap();
+            probes.retain(|p| !p.name.eq_ignore_ascii_case(name));
+            self.persist(&probes)?;
+        }
+        self.update(|s| s.probes.retain(|p| !p.name.eq_ignore_ascii_case(name)));
+        Ok(())
+    }
+
+    fn persist(&self, probes: &[ProbeEntry]) -> Result<(), Failure> {
+        let Some(path) = &self.config.source else {
+            return Ok(());
+        };
+        let mut cfg = self.config.clone();
+        cfg.probes = probes.to_vec();
+        cfg.save(path)
+            .map_err(|e| Failure::internal(format!("saving {}: {e:#}", path.display())))
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Snapshot> {
@@ -355,11 +451,7 @@ impl Controller {
                 ));
             }
         }
-        let entry = self
-            .config
-            .probe(&req.probe)
-            .cloned()
-            .ok_or_else(|| {
+        let entry = self.probe_entry(&req.probe).ok_or_else(|| {
                 Failure::new(
                     FailureKind::InvalidTarget,
                     "Unknown probe",
@@ -463,7 +555,8 @@ impl Controller {
     /// Authenticate to every configured probe and report what it allows.
     pub async fn check_probes(self: &Arc<Self>) {
         let mut tasks = Vec::new();
-        for entry in self.config.probes.clone() {
+        let entries = self.probes.lock().unwrap().clone();
+        for entry in entries {
             let me = self.clone();
             tasks.push(tokio::spawn(async move { me.check_probe(entry).await }));
         }
@@ -1201,7 +1294,11 @@ fn derive_status(s: &mut Snapshot) {
         Phase::Disconnected => (
             Indicator::Red,
             "Not connected".into(),
-            "Choose a probe, enter the device's address, and connect.".into(),
+            if s.probes.is_empty() {
+                "Add a probe to get started.".into()
+            } else {
+                "Choose a probe, enter the device's address, and connect.".into()
+            },
         ),
         Phase::Authenticating => (
             Indicator::Amber,

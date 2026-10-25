@@ -22,6 +22,7 @@ First release: a working direct-mode vertical slice.
   device's own address mapped onto the tunnel; pre-flight diagnostics (HTTPS detection,
   certificate fingerprint, cross-port and cross-host redirects); live status window with red /
   amber / green / gray indicator, throughput and connection metrics; terminal `connect`; `diag`.
+- **Double-click first run:** `portglass.exe` creates its identity on first launch, opens without a console window, shows *Add a probe* with your fingerprint and a form to pair a probe (saved to `controller.toml`), and reports startup problems such as a missing Chrome in a dialog. `portglass-probe.exe` sets itself up on first launch, asks in its console who may connect and which devices to allow, prints what to enter on the technician's PC, and waits for Enter before closing.
 - **Mock device** (`portglass-mock-target`): HTML, script, forms, cookie login, WebSocket echo and
   push, large binary download, HTTPS with a throwaway certificate.
 - Tests: forwarding (HTTP, WebSocket, byte-exact concurrent downloads, half-close), authorization

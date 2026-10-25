@@ -153,6 +153,38 @@ impl ControllerConfig {
         Ok(())
     }
 
+    /// Write the configuration back to `path`, keeping paths relative to its folder.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let base = path.parent().unwrap_or(Path::new("."));
+        let mut out = self.clone();
+        if let Ok(p) = out.identity_dir.strip_prefix(base) {
+            out.identity_dir = p.to_path_buf();
+        }
+        if let Ok(p) = out.audit_log.strip_prefix(base) {
+            out.audit_log = p.to_path_buf();
+        }
+        let text = format!(
+            "# PortGlass Controller configuration.\n\n{}",
+            toml::to_string_pretty(&out)?
+        );
+        std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Create identity and configuration at `path` if they don't exist yet (first run).
+    /// Returns true when it created them.
+    pub fn ensure_initialized(path: &Path, operator: &str) -> Result<bool> {
+        if path.exists() {
+            return Ok(false);
+        }
+        let dir = path.parent().context("config path has no parent")?;
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(path, template(operator))?;
+        let cfg = ControllerConfig::load(path)?;
+        portglass_core::identity::Identity::create(&cfg.identity_dir, "controller", operator)?;
+        Ok(true)
+    }
+
     pub fn probe(&self, name: &str) -> Option<&ProbeEntry> {
         self.probes
             .iter()

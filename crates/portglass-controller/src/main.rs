@@ -112,7 +112,25 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Probe { action } => probe_cmd(&path, action),
-        Cmd::Ui { no_window } => rt.block_on(ui(&path, no_window)),
+        Cmd::Ui { no_window } => {
+            // Double-clicked in Explorer: no console window behind the app, and errors in a
+            // dialog box rather than a console that closes before anyone can read it.
+            let standalone = !no_window && desktop::launched_from_explorer();
+            if standalone {
+                desktop::hide_console();
+            }
+            let result = (|| -> Result<()> {
+                let operator = std::env::var("USERNAME").unwrap_or_else(|_| "technician".into());
+                ControllerConfig::ensure_initialized(&path, &operator)?;
+                rt.block_on(ui(&path, no_window, standalone))
+            })();
+            if let Err(e) = &result {
+                if standalone {
+                    desktop::error_box(&format!("PortGlass couldn't start.\n\n{e:#}"));
+                }
+            }
+            result
+        }
         Cmd::Connect {
             probe,
             target,
@@ -174,7 +192,7 @@ fn probe_cmd(path: &Path, action: ProbeCmd) -> Result<()> {
                 fingerprint,
             });
             cfg.validate()?;
-            save(path, &cfg)?;
+            cfg.save(path)?;
             println!("Pinned probe {name} ({fingerprint}).");
         }
         ProbeCmd::List => {
@@ -191,28 +209,10 @@ fn probe_cmd(path: &Path, action: ProbeCmd) -> Result<()> {
             if cfg.probes.len() == before {
                 bail!("no probe named {name:?}");
             }
-            save(path, &cfg)?;
+            cfg.save(path)?;
             println!("Removed {name}.");
         }
     }
-    Ok(())
-}
-
-/// Rewrite the config with the probe list changed. Relative paths are written back relative.
-fn save(path: &Path, cfg: &ControllerConfig) -> Result<()> {
-    let base = path.parent().unwrap_or(Path::new("."));
-    let mut out = cfg.clone();
-    if let Ok(p) = out.identity_dir.strip_prefix(base) {
-        out.identity_dir = p.to_path_buf();
-    }
-    if let Ok(p) = out.audit_log.strip_prefix(base) {
-        out.audit_log = p.to_path_buf();
-    }
-    let text = format!(
-        "# PortGlass Controller configuration.\n\n{}",
-        toml::to_string_pretty(&out)?
-    );
-    std::fs::write(path, text)?;
     Ok(())
 }
 
@@ -228,7 +228,7 @@ fn load_controller(path: &Path, options: Options) -> Result<Arc<Controller>> {
     Ok(Controller::new(cfg, identity, audit, options))
 }
 
-async fn ui(path: &Path, no_window: bool) -> Result<()> {
+async fn ui(path: &Path, no_window: bool, standalone: bool) -> Result<()> {
     browser::sweep_stale_profiles();
     let ctrl = load_controller(path, Options::default())?;
     let server = portglass_controller::ui::serve(ctrl.clone()).await?;
@@ -262,6 +262,15 @@ async fn ui(path: &Path, no_window: bool) -> Result<()> {
             }
         }
     };
+    if window.is_none() && standalone {
+        // Nobody can see a console URL after a double-click; say what is missing instead.
+        desktop::error_box(
+            "PortGlass needs Google Chrome for its window and for the session browser.\n\n\
+             Install Chrome from google.com/chrome, then open PortGlass again.",
+        );
+        ctrl.disconnect().await;
+        return Ok(());
+    }
     if window.is_none() {
         println!("PortGlass is running at {}", server.url);
     } else {
@@ -428,4 +437,59 @@ async fn diag(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Behaviour when PortGlass is started from Explorer rather than a terminal.
+mod desktop {
+    /// True when this process is the only one attached to its console, i.e. Windows created
+    /// the console for us because we were double-clicked.
+    #[cfg(windows)]
+    pub fn launched_from_explorer() -> bool {
+        let mut pids = [0u32; 4];
+        // SAFETY: writes at most pids.len() entries into a buffer we own.
+        let n = unsafe {
+            windows_sys::Win32::System::Console::GetConsoleProcessList(
+                pids.as_mut_ptr(),
+                pids.len() as u32,
+            )
+        };
+        n == 1
+    }
+
+    #[cfg(windows)]
+    pub fn hide_console() {
+        // SAFETY: detaches from our own console; Windows closes the window it made for us.
+        unsafe {
+            windows_sys::Win32::System::Console::FreeConsole();
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn error_box(text: &str) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let wide = |s: &str| {
+            s.encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        };
+        let (text, title) = (wide(text), wide("PortGlass"));
+        // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the call.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn launched_from_explorer() -> bool {
+        false
+    }
+    #[cfg(not(windows))]
+    pub fn hide_console() {}
+    #[cfg(not(windows))]
+    pub fn error_box(_: &str) {}
 }

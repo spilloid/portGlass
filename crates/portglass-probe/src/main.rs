@@ -82,7 +82,26 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     match cli.command.unwrap_or(Cmd::Run) {
         Cmd::Init { name } => init(&config_path, name),
-        Cmd::Run => rt.block_on(run(&config_path)),
+        Cmd::Run => {
+            // Double-clicked: keep the console open at the end so its last words can be read.
+            let from_explorer = desktop::launched_from_explorer();
+            let result = (|| -> Result<()> {
+                if !config_path.exists() {
+                    init(&config_path, None)?;
+                    println!();
+                }
+                first_run_setup(&config_path)?;
+                rt.block_on(run(&config_path))
+            })();
+            if from_explorer {
+                if let Err(e) = &result {
+                    eprintln!("\nPortGlass Probe stopped: {e:#}");
+                }
+                println!("\nPress Enter to close this window.");
+                let _ = std::io::stdin().read_line(&mut String::new());
+            }
+            result
+        }
         Cmd::Fingerprint => {
             let cfg = ProbeConfig::load(&config_path)?;
             let id = Identity::load(&cfg.identity_dir, "probe")?;
@@ -319,4 +338,126 @@ async fn run(path: &Path) -> Result<()> {
     println!("Stopping: ending all sessions...");
     handle.shutdown().await;
     Ok(())
+}
+
+fn prompt(question: &str) -> Result<String> {
+    use std::io::Write;
+    print!("{question}");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+/// Interactive pairing in the probe's own console, for a probe nobody has configured yet:
+/// who may connect, and what they may reach. Only runs when a person is at the console.
+fn first_run_setup(path: &Path) -> Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    let cfg = ProbeConfig::load(path)?;
+    if !cfg.controllers.is_empty() && !cfg.allow.is_empty() {
+        return Ok(());
+    }
+    let id = Identity::load(&cfg.identity_dir, "probe")?;
+    println!("PortGlass Probe setup");
+    println!("=====================");
+    println!("Nobody can connect to this probe yet. Two questions, then it starts.");
+    println!("(Press Enter on a blank line to skip a step; you can change all of this later");
+    println!(" in {}.)", path.display());
+    println!();
+    if cfg.controllers.is_empty() {
+        println!("1. Who may connect?");
+        println!("   In the PortGlass window on the technician's PC, choose Add probe and copy");
+        println!("   \"your fingerprint\". Paste it here.");
+        loop {
+            let fp = prompt("   Technician's fingerprint: ")?;
+            if fp.is_empty() {
+                break;
+            }
+            match fp.parse::<Fingerprint>() {
+                Ok(fp) => {
+                    let name = prompt("   Their name (for the audit log): ")?;
+                    let name = if name.is_empty() {
+                        "technician".to_string()
+                    } else {
+                        name
+                    };
+                    authorize(path, &name, &fp.to_string())?;
+                    break;
+                }
+                Err(e) => println!(
+                    "   That isn't a fingerprint ({e}). Try again, or press Enter to skip."
+                ),
+            }
+        }
+        println!();
+    }
+    if cfg.allow.is_empty() {
+        println!("2. What may they reach?");
+        println!("   Enter a device's address and port, for example 192.168.1.50:80.");
+        println!("   Only what you list here is reachable. Add more on separate lines.");
+        loop {
+            let entry = prompt("   Device (blank to finish): ")?;
+            if entry.is_empty() {
+                break;
+            }
+            match parse_target(&entry) {
+                Ok(t) => {
+                    let label = prompt("   Label, e.g. Front office printer (optional): ")?;
+                    let label = (!label.is_empty()).then_some(label);
+                    if let Err(e) = allow(path, &t.host, &[t.port.to_string()], label) {
+                        println!("   Not added: {e:#}");
+                    }
+                }
+                Err(e) => println!("   Use address:port, for example 192.168.1.50:80 ({e:#})."),
+            }
+        }
+        println!();
+    }
+    let cfg = ProbeConfig::load(path)?;
+    let port = cfg
+        .listen
+        .rsplit_once(':')
+        .map(|(_, p)| p)
+        .unwrap_or("47100");
+    println!("3. On the technician's PC, in Add probe, enter:");
+    println!("   Name:        {}", cfg.name);
+    println!("   Address:     {}:{port}", local_address_hint());
+    println!("   Fingerprint: {}", id.fingerprint);
+    println!();
+    Ok(())
+}
+
+/// This computer's likely LAN address, for the pairing instructions. Opens no connection:
+/// connecting a UDP socket only selects a route.
+fn local_address_hint() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("192.0.2.1:9")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "<this computer's IP>".into())
+}
+
+mod desktop {
+    /// True when Windows created this console for us (we were double-clicked).
+    #[cfg(windows)]
+    pub fn launched_from_explorer() -> bool {
+        let mut pids = [0u32; 4];
+        // SAFETY: writes at most pids.len() entries into a buffer we own.
+        let n = unsafe {
+            windows_sys::Win32::System::Console::GetConsoleProcessList(
+                pids.as_mut_ptr(),
+                pids.len() as u32,
+            )
+        };
+        n == 1
+    }
+    #[cfg(not(windows))]
+    pub fn launched_from_explorer() -> bool {
+        false
+    }
 }
