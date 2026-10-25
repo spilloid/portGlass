@@ -120,7 +120,7 @@ fn main() -> Result<()> {
                 desktop::hide_console();
             }
             let result = (|| -> Result<()> {
-                let operator = std::env::var("USERNAME").unwrap_or_else(|_| "technician".into());
+                let operator = config::current_user();
                 ControllerConfig::ensure_initialized(&path, &operator)?;
                 rt.block_on(ui(&path, no_window, standalone))
             })();
@@ -148,8 +148,7 @@ fn init(path: &Path, operator: Option<String>) -> Result<()> {
     }
     let dir = path.parent().context("config path has no parent")?;
     std::fs::create_dir_all(dir)?;
-    let operator = operator
-        .unwrap_or_else(|| std::env::var("USERNAME").unwrap_or_else(|_| "technician".into()));
+    let operator = operator.unwrap_or_else(config::current_user);
     std::fs::write(path, config::template(&operator))?;
     let cfg = ControllerConfig::load(path)?;
     let id = Identity::create(&cfg.identity_dir, "controller", &operator)?;

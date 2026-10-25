@@ -83,3 +83,38 @@ jobs:
           TAG: ${{ steps.meta.outputs.tag }}
           ASSET: ${{ steps.meta.outputs.asset }}
         run: gh release upload $env:TAG $env:ASSET "$($env:ASSET).sha256" --clobber
+
+  # The macOS controller (Apple silicon). Not code-signed or notarized yet: macOS asks the
+  # first time it is opened (see README). The Windows job above is unaffected by this one.
+  macos:
+    name: Build, package (macos-arm64 controller)
+    runs-on: macos-14
+    env:
+      TARGET: aarch64-apple-darwin
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+      - name: Check tag
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid release tag"; exit 1; }
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.+)"/\1/')
+          [ "v$version" = "$TAG" ] || { echo "Cargo.toml v$version does not match $TAG"; exit 1; }
+      - name: Test
+        run: |
+          rustup target add "$TARGET"
+          cargo test --workspace --target "$TARGET"
+      - name: Build and package
+        run: |
+          cargo build --release --target "$TARGET" -p portglass-controller
+          mkdir -p dist/portglass
+          cp "target/$TARGET/release/portglass" README.md LICENSE CHANGELOG.md SECURITY.md dist/portglass/
+          asset="portglass-$TAG-macos-arm64.tar.gz"
+          tar -C dist -czf "dist/$asset" portglass
+          (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
+          echo "ASSET=dist/$asset" >> "$GITHUB_ENV"
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
