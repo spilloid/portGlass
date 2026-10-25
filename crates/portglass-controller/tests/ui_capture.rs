@@ -30,6 +30,15 @@ const SIZES: [(u32, u32, &str); 3] = [
 ];
 const THEMES: [&str; 2] = ["dark", "light"];
 
+/// Where the fake device listens. Windows (and Linux) route all of 127/8 to loopback, so the
+/// device gets an address distinct from the tunnel's 127.0.0.1; macOS only configures
+/// 127.0.0.1, where the device is still distinguished from the tunnel by its port.
+const DEVICE_IP: &str = if cfg!(target_os = "macos") {
+    "127.0.0.1"
+} else {
+    "127.0.0.2"
+};
+
 struct Cdp {
     ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
     next: u64,
@@ -135,7 +144,7 @@ async fn controller_window_renders_cleanly_in_every_state() {
     let docs_img = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/img");
 
     // A probe with a mock printer behind it.
-    let mock_listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let mock_listener = TcpListener::bind((DEVICE_IP, 0)).await.unwrap();
     let mock = mock_listener.local_addr().unwrap();
     tokio::spawn(portglass_mock_target::serve_http(mock_listener));
     let dir = tempfile::tempdir().unwrap();
@@ -143,7 +152,7 @@ async fn controller_window_renders_cleanly_in_every_state() {
     let (ctl_id, _, _) = Identity::generate("controller", "alice").unwrap();
     let text = format!(
         "[probe]\nname='front-office'\nlisten='127.0.0.1:0'\n[[controller]]\nname='alice'\nfingerprint='{}'\n\
-         [[allow]]\nnetwork='127.0.0.2/32'\nports=[{}]\nlabel='Front office printer'\n",
+         [[allow]]\nnetwork='{DEVICE_IP}/32'\nports=[{}]\nlabel='Front office printer'\n",
         ctl_id.fingerprint,
         mock.port()
     );

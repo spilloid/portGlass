@@ -45,6 +45,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 portglass-probe.workspace = true
 portglass-mock-target = { path = "../portglass-mock-target" }

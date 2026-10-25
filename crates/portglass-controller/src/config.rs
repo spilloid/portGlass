@@ -78,7 +78,7 @@ pub struct ProbeEntry {
 }
 
 fn default_operator() -> String {
-    std::env::var("USERNAME").unwrap_or_else(|_| "technician".into())
+    current_user()
 }
 fn default_identity_dir() -> PathBuf {
     "identity".into()
@@ -96,12 +96,42 @@ fn yes() -> bool {
     true
 }
 
-pub fn default_dir() -> PathBuf {
-    std::env::var_os("APPDATA")
+/// Roaming settings: `%APPDATA%\PortGlass` on Windows, `~/Library/Application Support/PortGlass`
+/// on macOS, `$XDG_CONFIG_HOME/portglass` (or `~/.config/portglass`) elsewhere.
+pub fn settings_dir() -> PathBuf {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata).join("PortGlass");
+    }
+    let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("PortGlass")
-        .join("controller")
+        .unwrap_or_else(|| PathBuf::from("."));
+    if cfg!(target_os = "macos") {
+        return home.join("Library/Application Support/PortGlass");
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("portglass")
+}
+
+/// Machine-local, disposable data (session browser profiles): `%LOCALAPPDATA%\PortGlass` on
+/// Windows, the settings folder elsewhere.
+pub fn local_data_dir() -> PathBuf {
+    match std::env::var_os("LOCALAPPDATA") {
+        Some(local) => PathBuf::from(local).join("PortGlass"),
+        None => settings_dir(),
+    }
+}
+
+pub fn default_dir() -> PathBuf {
+    settings_dir().join("controller")
+}
+
+/// The signed-in user's name, for a default operator label.
+pub fn current_user() -> String {
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "technician".into())
 }
 
 pub fn default_path() -> PathBuf {

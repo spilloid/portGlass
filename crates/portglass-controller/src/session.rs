@@ -1161,20 +1161,26 @@ async fn accept_loop(
                 Err(_) => continue,
             },
         };
-        // 127.0.0.1 is reachable by every process on this PC; only the session browser may use
-        // the tunnel. Refused connections are closed before anything reaches the probe.
-        if !stats.admits(port, peer) {
-            stats.refused.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!("refused a local connection from {peer}: not the session browser");
-            drop(local);
-            continue;
-        }
         let _ = local.set_nodelay(true);
         let link = link.clone();
         let grant = grant.clone();
         let stats = stats.clone();
         let cancel = cancel.child_token();
-        tokio::spawn(async move { forward_one(local, link, grant, stats, cancel, idle).await });
+        tokio::spawn(async move {
+            // 127.0.0.1 is reachable by every process on this computer; only the session
+            // browser may use the tunnel. Refused connections close before anything reaches
+            // the probe. (The ownership lookup can block briefly, so it runs off the runtime.)
+            let gate = stats.clone();
+            let admitted = tokio::task::spawn_blocking(move || gate.admits(port, peer))
+                .await
+                .unwrap_or(false);
+            if !admitted {
+                stats.refused.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!("refused a local connection from {peer}: not the session browser");
+                return;
+            }
+            forward_one(local, link, grant, stats, cancel, idle).await
+        });
     }
 }
 

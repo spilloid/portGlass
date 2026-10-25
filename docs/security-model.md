@@ -123,7 +123,11 @@ the process that owns its client socket is part of the session browser's Job Obj
 process from the Windows TCP table, membership via `IsProcessInJob`). Everything else is closed
 before any byte reaches the probe, and counted in the window. Chrome is started suspended,
 assigned to the job, then resumed, so every process it ever starts is inside the job; if
-containment fails, the browser is not launched. `portglass connect --no-browser` deliberately
+containment fails, the browser is not launched. **On macOS** there are no job objects: the session browser leads its own process group (ended as a
+whole when the session closes), and a connection is admitted only if `lsof` names a process that
+descends from that browser (`proc_pidinfo` ancestry). Unlike Windows, Chrome is not contained if
+the controller itself crashes.
+`portglass connect --no-browser` deliberately
 opens the endpoint to any local process and says so in the window.
 
 The session browser is started with `--no-proxy-server`, so device traffic never goes to a

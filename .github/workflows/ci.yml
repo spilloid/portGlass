@@ -80,3 +80,53 @@ jobs:
             dist/*.zip
             dist/*.sha256
           retention-days: 14
+
+  macos:
+    name: Build, lint, test (macOS arm64 controller)
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (from rust-toolchain.toml) plus the macOS target
+        run: |
+          rustup show
+          rustup target add "$TARGET"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-macos-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-macos-
+      # .cargo/config.toml defaults to the Windows MSVC target; every command overrides it.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --target "$TARGET" -- -D warnings
+      - name: Unit and integration tests
+        run: cargo test --workspace --target "$TARGET"
+      # macOS runners ship Google Chrome. These prove the session browser, process
+      # containment and the tunnel gate (lsof + process ancestry) on macOS for real.
+      - name: Real-browser end-to-end
+        run: cargo test -p portglass-controller --target "$TARGET" --test browser -- --ignored
+      - name: UI capture validation (STD-008)
+        run: cargo test -p portglass-controller --target "$TARGET" --test ui_capture -- --ignored
+      - name: Keep UI captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-capture-macos
+          path: target/ui-capture/*.png
+          if-no-files-found: ignore
+      - name: Release build (unsigned development artifact)
+        run: |
+          cargo build --release --target "$TARGET" -p portglass-controller
+          mkdir -p dist/portglass
+          cp "target/$TARGET/release/portglass" README.md LICENSE dist/portglass/
+          tar -C dist -czf "dist/portglass-dev-${GITHUB_SHA::7}-macos-arm64.tar.gz" portglass
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portglass-dev-macos-arm64
+          path: dist/*.tar.gz
+          retention-days: 14

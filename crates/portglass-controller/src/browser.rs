@@ -32,11 +32,7 @@ pub struct BrowserInfo {
 }
 
 pub fn sessions_root() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("PortGlass")
-        .join("browser-sessions")
+    crate::config::local_data_dir().join("browser-sessions")
 }
 
 /// Locate Chrome: configured path, then the App Paths registration, then standard locations.
@@ -68,6 +64,18 @@ pub fn find_chrome(cfg: &BrowserConfig) -> Option<PathBuf> {
                     .join("Chrome")
                     .join("Application")
                     .join("chrome.exe"),
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ));
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(
+                PathBuf::from(home)
+                    .join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             );
         }
     }
@@ -221,13 +229,23 @@ impl BrowserHandle {
             Arc::new(job::Job::kill_on_close().context("creating a job object for the browser")?);
         #[cfg(windows)]
         cmd.creation_flags(job::CREATE_SUSPENDED);
+        // On Unix the browser leads its own process group, so it can be ended as a whole, and
+        // its processes are recognized by ancestry.
+        #[cfg(unix)]
+        cmd.process_group(0);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("starting {}", exe.display()))?;
         let pid = child.id();
+        #[cfg(windows)]
         let contained = match (child.raw_handle(), pid) {
             (Some(handle), Some(pid)) => job.assign(handle) && job::resume(pid),
             _ => false,
+        };
+        #[cfg(unix)]
+        let contained = match pid {
+            Some(pid) => job.adopt(pid),
+            None => false,
         };
         if !contained {
             let _ = child.kill().await;
@@ -465,26 +483,93 @@ mod job {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod job {
-    pub struct Job;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The Unix counterpart of the Windows job object: the session browser's root process,
+    /// which leads its own process group. Membership is decided by ancestry.
+    pub struct Job {
+        root: AtomicU32,
+    }
+
     impl Job {
         pub fn kill_on_close() -> Option<Job> {
-            None
+            Some(Job {
+                root: AtomicU32::new(0),
+            })
         }
-        pub fn assign(&self, _: i32) -> bool {
-            false
+
+        pub fn adopt(&self, pid: u32) -> bool {
+            self.root.store(pid, Ordering::SeqCst);
+            pid > 1
         }
-        pub fn terminate(&self) {}
-        pub fn contains(&self, _: u32) -> bool {
+
+        pub fn terminate(&self) {
+            let root = self.root.swap(0, Ordering::SeqCst);
+            if root > 1 {
+                // SAFETY: signals the process group this browser leads (process_group(0)).
+                unsafe {
+                    libc::killpg(root as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+
+        /// Is `pid` the browser or one of its descendants?
+        pub fn contains(&self, pid: u32) -> bool {
+            let root = self.root.load(Ordering::SeqCst);
+            if root <= 1 {
+                return false;
+            }
+            let mut p = pid;
+            for _ in 0..64 {
+                if p == root {
+                    return true;
+                }
+                match parent_of(p) {
+                    Some(parent) if parent > 1 && parent != p => p = parent,
+                    _ => return false,
+                }
+            }
             false
         }
     }
-    pub fn resume(_: u32) -> bool {
-        false
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            self.terminate();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn parent_of(pid: u32) -> Option<u32> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: proc_pidinfo writes at most `size` bytes into `info`.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        (n == size).then_some(info.pbi_ppid)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn parent_of(pid: u32) -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The command name is parenthesized and may contain spaces; fields resume after ')'.
+        stat.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

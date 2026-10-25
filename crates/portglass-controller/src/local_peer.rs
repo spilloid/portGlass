@@ -77,12 +77,63 @@ pub fn owning_pid(listener_port: u16, peer: SocketAddr) -> Option<u32> {
     None
 }
 
-#[cfg(not(windows))]
+/// macOS: ask `lsof` which process holds the client end of this exact socket pair. (The
+/// kernel's per-socket `proc_pidfdinfo` structures are not exposed by the `libc` crate.)
+#[cfg(target_os = "macos")]
+pub fn owning_pid(listener_port: u16, peer: SocketAddr) -> Option<u32> {
+    if peer.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+        return None;
+    }
+    let out = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-nP", "-a", "-sTCP:ESTABLISHED", "-Fpn"])
+        .arg(format!("-iTCP@127.0.0.1:{}", peer.port()))
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    parse_lsof(
+        &String::from_utf8_lossy(&out.stdout),
+        listener_port,
+        peer.port(),
+    )
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn owning_pid(_listener_port: u16, _peer: SocketAddr) -> Option<u32> {
     None
 }
 
-#[cfg(all(test, windows))]
+/// Find the process whose socket is `127.0.0.1:<peer_port> -> 127.0.0.1:<listener_port>` in
+/// `lsof -Fpn` output (`p<pid>` lines followed by that process's `n<name>` lines).
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn parse_lsof(text: &str, listener_port: u16, peer_port: u16) -> Option<u32> {
+    let wanted = format!("127.0.0.1:{peer_port}->127.0.0.1:{listener_port}");
+    let mut pid = None;
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.trim().parse::<u32>().ok();
+        } else if let Some(name) = line.strip_prefix('n') {
+            if name.trim() == wanted {
+                return pid;
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod parse_tests {
+    #[test]
+    fn picks_the_client_end_not_the_listener_end() {
+        let out = "p100\nf5\nn127.0.0.1:50000->127.0.0.1:61000\np200\nf9\nn127.0.0.1:61000->127.0.0.1:50000\n";
+        // Client 127.0.0.1:61000 connected to the tunnel listening on 50000.
+        assert_eq!(super::parse_lsof(out, 50000, 61000), Some(200));
+        assert_eq!(super::parse_lsof(out, 50000, 61001), None);
+        assert_eq!(super::parse_lsof("", 1, 2), None);
+    }
+}
+
+#[cfg(all(test, any(windows, target_os = "macos")))]
 mod tests {
     use super::*;
 

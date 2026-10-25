@@ -3,7 +3,7 @@
 **Operate one web interface on a remote LAN as if it were on your desk — without a VPN, remote
 desktop, or routing a whole network.**
 
-PortGlass v0.1.0 · Windows · MIT · [Docs site](https://spilloid.github.io/portGlass/)
+PortGlass v0.2.0 · Windows, and macOS (Apple silicon) for the technician · MIT · [Docs site](https://spilloid.github.io/portGlass/)
 
 A technician picks a probe, types `192.168.1.50:80`, and a dedicated, isolated browser window
 opens on the printer's real web interface. Closing the session closes the tunnel and deletes
@@ -38,7 +38,8 @@ Details: [architecture](docs/architecture.md) · [security model and threat anal
 
 ## Requirements
 
-- Windows 10 or 11 (x64) on both ends.
+- **Probe:** Windows 10 or 11 (x64).
+- **Technician:** Windows 10 or 11 (x64), or macOS 13+ on Apple silicon (preview — see below).
 - Google Chrome installed on the technician's PC. PortGlass does not bundle a browser.
 - The technician's PC must reach the probe's TCP port (default 47100): same LAN, or an existing
   authorized VPN. Relay mode for NAT-to-NAT is designed for but not built in v0.1.0.
@@ -63,6 +64,10 @@ portglass-probe run
 portglass probe add --name front-office --address 10.0.5.20:47100 --fingerprint sha256:6F59:...
 portglass connect --probe front-office --target 192.168.1.50:80
 ```
+
+### On a Mac
+
+Download `portglass-v0.2.0-macos-arm64.tar.gz` from the release, double-click it to unpack, and open the `portglass` program inside. The Mac build isn't notarized by Apple yet, so the first time macOS refuses to open it: **right-click → Open → Open**, or run `xattr -d com.apple.quarantine portglass` in Terminal. The window and the session browser work as on Windows (Chrome required); it connects to the same Windows probes.
 
 For an administrator-managed install of the probe (Program Files, locked-down ProgramData,
 Start menu shortcut, scoped firewall rule) see [deployment](docs/deployment.md).

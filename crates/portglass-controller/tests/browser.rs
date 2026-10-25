@@ -18,6 +18,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
+/// Where the fake device listens. Windows (and Linux) route all of 127/8 to loopback, so the
+/// device gets an address distinct from the tunnel's 127.0.0.1; macOS only configures
+/// 127.0.0.1, where the device is still distinguished from the tunnel by its port.
+const DEVICE_IP: &str = if cfg!(target_os = "macos") {
+    "127.0.0.1"
+} else {
+    "127.0.0.2"
+};
+
 struct Cdp {
     ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
     next: u64,
@@ -122,7 +131,7 @@ async fn real_browser_session_through_the_tunnel() {
         .try_init();
     // The "device" lives at 127.0.0.2 so the browser's address bar shows something other than
     // the tunnel's own 127.0.0.1 endpoint.
-    let mock_listener = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let mock_listener = TcpListener::bind((DEVICE_IP, 0)).await.unwrap();
     let mock = mock_listener.local_addr().unwrap();
     tokio::spawn(portglass_mock_target::serve_http(mock_listener));
 
@@ -131,7 +140,7 @@ async fn real_browser_session_through_the_tunnel() {
     let (ctl_id, _, _) = Identity::generate("controller", "alice").unwrap();
     let text = format!(
         "[probe]\nname='p'\nlisten='127.0.0.1:0'\n[[controller]]\nname='alice'\nfingerprint='{}'\n\
-         [[allow]]\nnetwork='127.0.0.2/32'\nports=[{}]\n",
+         [[allow]]\nnetwork='{DEVICE_IP}/32'\nports=[{}]\n",
         ctl_id.fingerprint,
         mock.port()
     );

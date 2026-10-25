@@ -3,7 +3,21 @@
 All notable changes to PortGlass. Versions follow [semver](https://semver.org/); the version in
 `Cargo.toml` (`[workspace.package]`) is authoritative.
 
-## 0.1.0 — unreleased
+## 0.2.0 — unreleased
+
+### Added
+- **macOS controller (Apple silicon, preview).** The technician side runs on macOS 13+ and connects
+  to the same Windows probes. The session browser leads its own process group and is ended with it;
+  the tunnel admits only processes descended from that browser (socket owner from `lsof`,
+  ancestry from `proc_pidinfo`). Not yet notarized. CI builds and tests it on `macos-14`,
+  including the real-Chrome end-to-end and UI capture suites; releases attach
+  `portglass-<tag>-macos-arm64.tar.gz`.
+
+### Changed
+- The tunnel's ownership check runs per connection off the async runtime, so a slow lookup never
+  delays other connections.
+
+## 0.1.0 — 2026-10-24
 
 First release: a working direct-mode vertical slice.
 

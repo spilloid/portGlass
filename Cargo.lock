@@ -717,13 +717,14 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "portglass-controller"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "futures-util",
  "hex",
+ "libc",
  "portglass-core",
  "portglass-mock-target",
  "portglass-probe",
@@ -747,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "portglass-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -768,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "portglass-mock-target"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -785,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "portglass-probe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -808,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "portglass-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
