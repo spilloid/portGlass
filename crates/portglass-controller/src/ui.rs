@@ -175,15 +175,24 @@ async fn check_probes(State(app): State<App>, _headers: HeaderMap, _body: Body) 
 #[derive(serde::Deserialize)]
 struct AddProbe {
     name: String,
+    #[serde(default)]
     address: String,
     fingerprint: String,
+    /// Both empty: connect directly.
+    #[serde(default)]
+    relay_address: String,
+    #[serde(default)]
+    relay_fingerprint: String,
 }
 
 async fn add_probe(State(app): State<App>, Json(req): Json<AddProbe>) -> Response {
-    match app
-        .ctrl
-        .add_probe(&req.name, &req.address, &req.fingerprint)
-    {
+    match app.ctrl.add_probe(
+        &req.name,
+        &req.address,
+        &req.fingerprint,
+        (!req.relay_address.trim().is_empty() || !req.relay_fingerprint.trim().is_empty())
+            .then_some((req.relay_address.as_str(), req.relay_fingerprint.as_str())),
+    ) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(f) => (StatusCode::BAD_REQUEST, Json(f)).into_response(),
     }

@@ -70,11 +70,17 @@ enum ProbeCmd {
     Add {
         #[arg(long)]
         name: String,
-        /// host:port, e.g. 10.0.5.20:47100
-        #[arg(long)]
+        /// host:port, e.g. 10.0.5.20:47100. Not needed with --relay.
+        #[arg(long, default_value = "")]
         address: String,
         #[arg(long)]
         fingerprint: String,
+        /// Reach the probe through a PortGlass Relay, e.g. relay.example.com:47200
+        #[arg(long, requires = "relay_fingerprint")]
+        relay: Option<String>,
+        /// The relay's fingerprint (portglass-relay fingerprint).
+        #[arg(long, requires = "relay")]
+        relay_fingerprint: Option<String>,
     },
     List,
     Remove {
@@ -175,20 +181,32 @@ fn probe_cmd(path: &Path, action: ProbeCmd) -> Result<()> {
             name,
             address,
             fingerprint,
+            relay,
+            relay_fingerprint,
         } => {
             let fingerprint: Fingerprint = fingerprint.parse()?;
             if cfg.probe(&name).is_some() {
                 bail!("a probe named {name:?} already exists (remove it first)");
             }
-            let address = if address.contains(':') {
-                address
-            } else {
-                format!("{address}:{}", portglass_proto::DEFAULT_PROBE_PORT)
+            let with_port = |a: String, port: u16| {
+                if a.is_empty() || a.contains(':') {
+                    a
+                } else {
+                    format!("{a}:{port}")
+                }
+            };
+            let relay = match (relay, relay_fingerprint) {
+                (Some(a), Some(fp)) => Some(config::RelayRoute {
+                    address: with_port(a, portglass_proto::DEFAULT_RELAY_PORT),
+                    fingerprint: fp.parse()?,
+                }),
+                _ => None,
             };
             cfg.probes.push(config::ProbeEntry {
                 name: name.clone(),
-                address,
+                address: with_port(address, portglass_proto::DEFAULT_PROBE_PORT),
                 fingerprint,
+                relay,
             });
             cfg.validate()?;
             cfg.save(path)?;
@@ -199,7 +217,7 @@ fn probe_cmd(path: &Path, action: ProbeCmd) -> Result<()> {
                 println!("No probes. Add one with `portglass probe add`.");
             }
             for p in &cfg.probes {
-                println!("{:<20} {:<24} {}", p.name, p.address, p.fingerprint);
+                println!("{:<20} {:<24} {}", p.name, p.route(), p.fingerprint);
             }
         }
         ProbeCmd::Remove { name } => {
@@ -405,7 +423,7 @@ async fn diag(path: &Path) -> Result<()> {
         println!("Probes:      none pinned");
     }
     for p in &cfg.probes {
-        print!("Probe {:<14} {:<22} ", p.name, p.address);
+        print!("Probe {:<14} {:<22} ", p.name, p.route());
         match tokio::time::timeout(
             Duration::from_secs(15),
             ProbeLink::connect(p, &identity, &cfg.operator),

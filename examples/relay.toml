@@ -1,0 +1,21 @@
+# Example PortGlass Relay configuration. Fingerprints are fictional.
+# Create a real one with `portglass-relay init`; it generates the identity too.
+
+[relay]
+name = "spillers-relay"
+listen = "0.0.0.0:47200"        # the one port to open on the relay's firewall
+identity_dir = "identity"       # relay.crt / relay.key, relative to this file
+audit_log = "audit.jsonl"
+
+[limits]
+max_pairs_per_probe = 256       # spliced connections per probe (one per browser connection)
+max_waiting_per_probe = 32      # controller requests waiting for the probe to answer
+answer_timeout_secs = 10
+idle_timeout_secs = 300
+registration_timeout_secs = 45  # probes ping every 15 s
+
+# Probes that may register. Technicians are not listed here: each probe publishes the
+# controllers its own allowlist accepts, and the relay pairs only those.
+[[probe]]
+name = "front-office"
+fingerprint = "sha256:FFFF:EEEE:DDDD:CCCC:BBBB:AAAA:9999:8888:7777:6666:5555:4444:3333:2222:1111:0000"

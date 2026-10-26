@@ -8,15 +8,15 @@ rather than hard to detect.
 
 ## What each component can do — and cannot
 
-| | Probe | Controller |
-|---|---|---|
-| Accepts network connections | Yes: one TCP port, mutual TLS only | Only on `127.0.0.1`: the UI (token-guarded) and the tunnel endpoint (session browser processes only) |
-| Makes network connections | To destinations in its own allowlist, for authorized sessions only | To pinned probes only |
-| Runs other programs | No (`icacls` once, at `init`, to restrict its private key) | Chrome (session and UI windows, started suspended, placed in a Job Object, then resumed); `reg`/`taskkill` for Chrome discovery and cleanup |
-| Reads/writes files | Its config, identity, audit log | Its config, identity, audit log, session browser profiles |
-| Elevation | None required | None required |
-| Persistence | None. Runs in a visible console until stopped | None |
-| Changes system settings | No | No (no proxy, routes, DNS, certificates, default browser) |
+| | Probe | Controller | Relay (optional) |
+|---|---|---|---|
+| Accepts network connections | Yes: one TCP port, mutual TLS only | Only on `127.0.0.1`: the UI (token-guarded) and the tunnel endpoint (session browser processes only) | Yes: one TCP port, TLS; pairs only listed probes with the controllers they publish |
+| Makes network connections | To destinations in its own allowlist, for authorized sessions only; to its configured relay, if any | To pinned probes, directly or through a pinned relay | None |
+| Runs other programs | No (`icacls` once, at `init`, to restrict its private key) | Chrome (session and UI windows, started suspended, placed in a Job Object, then resumed); `reg`/`taskkill` for Chrome discovery and cleanup | No (`icacls` once, at `init`, on Windows) |
+| Reads/writes files | Its config, identity, audit log | Its config, identity, audit log, session browser profiles | Its config, identity, audit log |
+| Elevation | None required | None required | None required |
+| Persistence | None. Runs in a visible console until stopped | None | Whatever its administrator sets up (a systemd unit is provided) |
+| Changes system settings | No | No (no proxy, routes, DNS, certificates, default browser) | No |
 
 The probe's entire remote command surface is: open a session, check a session's target, close a
 session, ping. That is a closed Rust enum with `deny_unknown_fields`; an unknown command is
@@ -161,10 +161,15 @@ process command line — same-user processes are inside the trust boundary on Wi
 | T11 | Tampered binaries | Version resources and Authenticode signing in the release pipeline. | Development builds are unsigned. |
 | T12 | Compromised probe attacks the technician's PC | Probe strings validated (fixed-format ids/tokens, never used as paths); the probe can only answer within the protocol; the device page runs in an isolated, throwaway browser profile. | A compromised probe controls what the technician sees from the device. |
 | T13 | Other local software uses an open tunnel | Tunnel endpoint admits only session-browser processes. | Same-user code that injects into Chrome is inside the browser's trust boundary. |
+| T14 | Malicious or compromised relay | The relay never terminates the PortGlass TLS: controller and probe authenticate each other end to end through it, pinned at both ends, and the probe applies its own allowlist and policy to every relayed connection exactly as to a direct one. The relay holds neither key. | It sees metadata (which fingerprints meet, when, from which IPs, byte counts) and can refuse, drop, delay or throttle connections. |
+| T15 | Stranger uses the relay | Only probes listed in `relay.toml` can register. A controller is paired only with a registered probe whose published allowlist contains its fingerprint, and gets one indistinguishable answer otherwise. Tickets are random 128-bit values bound to the probe they were issued to. Handshake, waiting and per-probe pair caps apply. | Anyone can complete a TLS handshake with the relay and learn that it is a PortGlass relay. Bound by the handshake caps, as T1. |
+| T16 | Hostile relay floods the probe | Relayed answers share the probe's pending-handshake cap and then face its normal mutual TLS. A relay can make the probe dial back, but not get past authentication. | Bounded CPU and connection churn on the probe while the relay misbehaves; remove `[relay]` to stop it. |
 
 ## Known limitations
 
-- Relay/NAT traversal is not implemented; direct reachability (LAN or existing VPN) is required.
+- The relay is a server someone has to run. It sees connection metadata, though never content.
+  There is no hosted relay service.
+- A probe registers with at most one relay.
 - One destination port per session; multi-port devices need multiple sessions.
 - Private keys are ACL-protected files, not DPAPI/TPM-backed.
 - No Windows service mode; the probe runs in a visible console.

@@ -20,6 +20,18 @@ pub struct ProbeConfigFile {
     pub controllers: Vec<ControllerEntry>,
     #[serde(default, rename = "allow")]
     pub allow: Vec<AllowEntry>,
+    /// Register with a PortGlass Relay, for technicians who cannot reach `listen` directly.
+    #[serde(default)]
+    pub relay: Option<RelayEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayEntry {
+    /// host:port of the relay, e.g. `relay.example.com:47200`.
+    pub address: String,
+    /// The relay's fingerprint (`portglass-relay fingerprint`).
+    pub fingerprint: Fingerprint,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +140,7 @@ pub struct ProbeConfig {
     pub limits: Limits,
     pub controllers: Vec<ControllerEntry>,
     pub allow: Vec<AllowRule>,
+    pub relay: Option<RelayEntry>,
     pub source: Option<PathBuf>,
 }
 
@@ -164,6 +177,15 @@ impl ProbeConfig {
                 bail!("controller fingerprint {} is listed twice", c.fingerprint);
             }
         }
+        if let Some(r) = &file.relay {
+            let valid = r
+                .address
+                .rsplit_once(':')
+                .is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok_and(|p| p != 0));
+            if !valid {
+                bail!("[relay] address {:?} is not host:port", r.address);
+            }
+        }
         let l = &file.limits;
         if l.max_session_ttl_secs == 0
             || l.max_streams_per_session == 0
@@ -182,6 +204,7 @@ impl ProbeConfig {
             limits: file.limits,
             controllers: file.controllers,
             allow,
+            relay: file.relay,
             source: None,
         })
     }
@@ -268,6 +291,12 @@ control_timeout_secs = 30
 # name = "alice"
 # fingerprint = "sha256:...."
 
+# For technicians on other networks: register with a PortGlass Relay that both sides can reach
+# (`portglass-probe use-relay`). The relay carries the same end-to-end encrypted connection.
+# [relay]
+# address = "relay.example.com:47200"
+# fingerprint = "sha256:...."
+
 # One block per destination the probe may reach. Nothing else is reachable.
 # [[allow]]
 # network = "192.168.1.50"
@@ -300,6 +329,25 @@ mod tests {
         let cfg = ProbeConfig::from_file(file, Path::new(".")).unwrap();
         assert_eq!(cfg.controllers.len(), 1);
         assert_eq!(cfg.allow.len(), 2);
+    }
+
+    #[test]
+    fn relay_section_parses_and_is_validated() {
+        let fp = "sha256:FFFF:EEEE:DDDD:CCCC:BBBB:AAAA:9999:8888:7777:6666:5555:4444:3333:2222:1111:0000";
+        let base = "[probe]\nname='x'\nlisten='127.0.0.1:1'\n";
+        let ok = format!("{base}[relay]\naddress='relay.example.com:47200'\nfingerprint='{fp}'\n");
+        let cfg = ProbeConfig::from_file(toml::from_str(&ok).unwrap(), Path::new(".")).unwrap();
+        assert_eq!(cfg.relay.unwrap().address, "relay.example.com:47200");
+        for bad in ["relay.example.com", ":47200", "relay.example.com:0"] {
+            let text = format!("{base}[relay]\naddress='{bad}'\nfingerprint='{fp}'\n");
+            let file: ProbeConfigFile = toml::from_str(&text).unwrap();
+            assert!(
+                ProbeConfig::from_file(file, Path::new(".")).is_err(),
+                "{bad}"
+            );
+        }
+        let extra = format!("{base}[relay]\naddress='r:1'\nfingerprint='{fp}'\nopen=true\n");
+        assert!(toml::from_str::<ProbeConfigFile>(&extra).is_err());
     }
 
     #[test]

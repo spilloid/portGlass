@@ -1,0 +1,36 @@
+# systemd unit for PortGlass Relay. Install to /etc/systemd/system/portglass-relay.service.
+# Assumes the binary at /usr/local/bin/portglass-relay and a `portglass-relay` system user whose
+# home holds relay.toml (see docs/relay.md).
+
+[Unit]
+Description=PortGlass Relay
+Documentation=https://github.com/spilloid/portGlass/blob/main/docs/relay.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=portglass-relay
+Group=portglass-relay
+ExecStart=/usr/local/bin/portglass-relay --config /var/lib/portglass-relay/relay.toml run
+Restart=on-failure
+RestartSec=5
+
+# The relay needs its config directory and the network, nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/portglass-relay
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -130,3 +130,37 @@ jobs:
           name: portglass-dev-macos-arm64
           path: dist/*.tar.gz
           retention-days: 14
+  linux-relay:
+    name: Build, lint, test (Linux relay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain plus the musl target
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          rustup show
+          rustup target add "$TARGET"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-linux-
+      # .cargo/config.toml defaults to the Windows MSVC target; every command overrides it.
+      # Only the crates the relay is built from: the probe and controller are Windows/macOS.
+      - name: Clippy
+        run: cargo clippy --target "$TARGET" -p portglass-proto -p portglass-core -p portglass-relay --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --target "$TARGET" -p portglass-proto -p portglass-core -p portglass-relay
+      - name: Release build (development artifact)
+        run: cargo build --release --target "$TARGET" -p portglass-relay
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portglass-relay-dev-linux-x64
+          path: target/x86_64-unknown-linux-musl/release/portglass-relay
+          retention-days: 14

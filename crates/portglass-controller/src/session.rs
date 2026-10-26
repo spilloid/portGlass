@@ -208,7 +208,7 @@ pub struct Controller {
 fn probe_view(p: &ProbeEntry) -> ProbeView {
     ProbeView {
         name: p.name.clone(),
-        address: p.address.clone(),
+        address: p.route(),
         fingerprint: p.fingerprint.to_string(),
         status: ProbeStatus::Unknown,
         message: None,
@@ -317,6 +317,7 @@ impl Controller {
         name: &str,
         address: &str,
         fingerprint: &str,
+        relay: Option<(&str, &str)>,
     ) -> Result<(), Failure> {
         let bad = |detail: String, hint: &str| {
             Failure::new(
@@ -340,23 +341,53 @@ impl Controller {
                     "Copy it exactly from the probe's console (it starts with sha256:).",
                 )
             })?;
-        let mut address = address.trim().to_string();
-        if !address.contains(':') {
-            address = format!("{address}:{}", portglass_proto::DEFAULT_PROBE_PORT);
-        }
-        let valid = address
-            .rsplit_once(':')
-            .is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok_and(|p| p != 0));
-        if !valid {
-            return Err(bad(
-                format!("{address:?} isn't host:port."),
-                "For example: 10.0.5.20:47100.",
-            ));
-        }
+        let with_port = |s: &str, port: u16| {
+            let s = s.trim();
+            if s.contains(':') {
+                s.to_string()
+            } else {
+                format!("{s}:{port}")
+            }
+        };
+        let relay = match relay {
+            Some((relay_address, relay_fingerprint)) => {
+                let address = with_port(relay_address, portglass_proto::DEFAULT_RELAY_PORT);
+                if !crate::config::is_host_port(&address) {
+                    return Err(bad(
+                        format!("The relay address {address:?} isn't host:port."),
+                        "For example: relay.example.com:47200.",
+                    ));
+                }
+                let fingerprint = relay_fingerprint.trim().parse().map_err(|e| {
+                    bad(
+                        format!("The relay fingerprint isn't valid: {e}"),
+                        "Copy it exactly from the relay (portglass-relay fingerprint).",
+                    )
+                })?;
+                Some(crate::config::RelayRoute {
+                    address,
+                    fingerprint,
+                })
+            }
+            None => None,
+        };
+        let address = if relay.is_some() && address.trim().is_empty() {
+            String::new()
+        } else {
+            let address = with_port(address, portglass_proto::DEFAULT_PROBE_PORT);
+            if !crate::config::is_host_port(&address) {
+                return Err(bad(
+                    format!("{address:?} isn't host:port."),
+                    "For example: 10.0.5.20:47100.",
+                ));
+            }
+            address
+        };
         let entry = ProbeEntry {
             name: name.to_string(),
             address,
             fingerprint,
+            relay,
         };
         {
             let mut probes = self.probes.lock().unwrap();
@@ -627,7 +658,7 @@ impl Controller {
             &[
                 ("operator", json!(self.config.operator)),
                 ("probe", json!(entry.name)),
-                ("probe_address", json!(entry.address)),
+                ("probe_address", json!(entry.route())),
                 ("probe_fingerprint", json!(entry.fingerprint.to_string())),
                 ("target", json!(target.to_string())),
                 ("ttl_secs", json!(ttl_secs)),

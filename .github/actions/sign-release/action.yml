@@ -1,6 +1,6 @@
 name: Sign and verify release files
 description: >
-  Signs dist/portglass.exe and dist/portglass-probe.exe with Azure Artifact Signing, then fails
+  Signs dist/portglass.exe, dist/portglass-probe.exe and dist/portglass-relay.exe with Azure Artifact Signing, then fails
   unless every listed file carries a valid, timestamped signature from the expected certificate
   profile. Shared by the release workflow and the signing check, so every signed file goes through
   one signing path and one verification rule. Mirrors SpoolSmith's action of the same name.
@@ -45,7 +45,7 @@ runs:
       shell: pwsh
       run: |
         New-Item -ItemType Directory -Force dist-unshipped | Out-Null
-        Get-ChildItem dist -Filter *.exe | Where-Object Name -notin 'portglass.exe', 'portglass-probe.exe' |
+        Get-ChildItem dist -Filter *.exe | Where-Object Name -notin 'portglass.exe', 'portglass-probe.exe', 'portglass-relay.exe' |
           Move-Item -Destination dist-unshipped -Force
 
     - name: Sign files
@@ -76,4 +76,4 @@ runs:
       shell: pwsh
       env:
         EXPECTED_SUBJECT: ${{ inputs.expected-subject }}
-      run: ./scripts/verify-signature.ps1 -Files dist/portglass.exe, dist/portglass-probe.exe -ExpectedSubject $env:EXPECTED_SUBJECT
+      run: ./scripts/verify-signature.ps1 -Files dist/portglass.exe, dist/portglass-probe.exe, dist/portglass-relay.exe -ExpectedSubject $env:EXPECTED_SUBJECT

@@ -72,9 +72,39 @@ pub enum Isolation {
 #[serde(deny_unknown_fields)]
 pub struct ProbeEntry {
     pub name: String,
-    /// host:port of the probe, e.g. `10.0.5.20:47100`.
+    /// host:port of the probe, e.g. `10.0.5.20:47100`. Unused (and may be empty) when `relay` is
+    /// set.
+    #[serde(default)]
     pub address: String,
     pub fingerprint: Fingerprint,
+    /// Reach this probe through a PortGlass Relay instead of connecting to `address`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayRoute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayRoute {
+    /// host:port of the relay, e.g. `relay.example.com:47200`.
+    pub address: String,
+    /// The relay's fingerprint (`portglass-relay fingerprint`).
+    pub fingerprint: Fingerprint,
+}
+
+impl ProbeEntry {
+    /// Where connections to this probe go, for display.
+    pub fn route(&self) -> String {
+        match &self.relay {
+            Some(r) => format!("via relay {}", r.address),
+            None => self.address.clone(),
+        }
+    }
+}
+
+/// `host:port` with a non-empty host and a non-zero port.
+pub fn is_host_port(s: &str) -> bool {
+    s.rsplit_once(':')
+        .is_some_and(|(h, p)| !h.is_empty() && p.parse::<u16>().is_ok_and(|p| p != 0))
 }
 
 fn default_operator() -> String {
@@ -165,11 +195,15 @@ impl ControllerConfig {
             if !names.insert(p.name.to_lowercase()) {
                 bail!("probe name {:?} is listed twice", p.name);
             }
-            if p.address
-                .rsplit_once(':')
-                .and_then(|(_, port)| port.parse::<u16>().ok())
-                .is_none()
-            {
+            if let Some(r) = &p.relay {
+                if !is_host_port(&r.address) {
+                    bail!(
+                        "probe {:?} relay address {:?} must be host:port",
+                        p.name,
+                        r.address
+                    );
+                }
+            } else if !is_host_port(&p.address) {
                 bail!(
                     "probe {:?} address {:?} must be host:port",
                     p.name,
@@ -256,6 +290,25 @@ mod tests {
             toml::from_str(include_str!("../../../examples/controller.toml")).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.probes.len(), 1);
+    }
+
+    #[test]
+    fn a_relayed_probe_needs_no_address_but_a_valid_relay() {
+        let fp = "sha256:FFFF:EEEE:DDDD:CCCC:BBBB:AAAA:9999:8888:7777:6666:5555:4444:3333:2222:1111:0000";
+        let entry = |relay_addr: &str| {
+            format!(
+                "[[probe]]\nname='p'\nfingerprint='{fp}'\n[probe.relay]\naddress='{relay_addr}'\nfingerprint='{fp}'\n"
+            )
+        };
+        let cfg: ControllerConfig = toml::from_str(&entry("relay.example.com:47200")).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.probes[0].route(), "via relay relay.example.com:47200");
+        let cfg: ControllerConfig = toml::from_str(&entry("relay.example.com")).unwrap();
+        assert!(cfg.validate().is_err());
+        // Without a relay, an address is still required.
+        let direct: ControllerConfig =
+            toml::from_str(&format!("[[probe]]\nname='p'\nfingerprint='{fp}'\n")).unwrap();
+        assert!(direct.validate().is_err());
     }
 
     #[test]

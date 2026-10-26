@@ -15,6 +15,9 @@ The PortGlass window's **Activity** list shows each step of the last session wit
 
 | Message | Meaning | What to do |
 |---|---|---|
+| **Can't reach the relay for probe …** | No TCP connection to the relay | Relay address right? Is `portglass-relay` running, and TCP 47200 open at the VPS provider and on the host? |
+| **The relay presented the wrong identity** | Something answered at the relay address with a different certificate | Compare with `portglass-relay fingerprint` on the relay. Don't proceed if you didn't expect a change. |
+| **Probe … isn't available through the relay** | The probe isn't registered there, or doesn't authorize this controller | The probe console should say `Registered with relay`. If it says the relay refused it, the relay administrator runs `portglass-relay authorize`. Check that `portglass-probe check-config` lists your fingerprint. See [relay.md](relay.md#troubleshooting). |
 | **Can't reach probe …** | No TCP connection to the probe's address and port | Is `portglass-probe run` running? Right address/port? Firewall rule on the probe (`scripts/probe-firewall.ps1`)? On a VPN if required? |
 | **Probe … presented the wrong identity** | Something answered at that address with a different certificate | Check the address. If the probe was re-initialized, get its new fingerprint (`portglass-probe fingerprint`), `portglass probe remove` + `add`. If you didn't expect a change, stop and investigate. |
 | **Probe … doesn't recognize this controller** | Your certificate isn't in the probe's `[[controller]]` list | Send `portglass fingerprint` to the probe's administrator; they run `portglass-probe authorize`. |

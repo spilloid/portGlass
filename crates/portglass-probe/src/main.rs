@@ -52,6 +52,15 @@ enum Cmd {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Register with a PortGlass Relay, for technicians on other networks.
+    UseRelay {
+        /// host:port of the relay, e.g. relay.example.com:47200
+        #[arg(long)]
+        address: String,
+        /// The relay's fingerprint (portglass-relay fingerprint).
+        #[arg(long)]
+        fingerprint: String,
+    },
     /// Validate the configuration and print the effective policy.
     CheckConfig,
     /// Check a destination against the policy and test-connect to it from this machine.
@@ -114,6 +123,10 @@ fn main() -> Result<()> {
             ports,
             label,
         } => allow(&config_path, &network, &ports, label),
+        Cmd::UseRelay {
+            address,
+            fingerprint,
+        } => use_relay(&config_path, &address, &fingerprint),
         Cmd::CheckConfig => {
             let cfg = ProbeConfig::load(&config_path)?;
             print_policy(&cfg);
@@ -210,9 +223,44 @@ fn allow(path: &Path, network: &str, ports: &[String], label: Option<String>) ->
     Ok(())
 }
 
+fn use_relay(path: &Path, address: &str, fingerprint: &str) -> Result<()> {
+    let fp: Fingerprint = fingerprint.trim().parse()?;
+    let address = address.trim();
+    let address = if address.contains(':') {
+        address.to_string()
+    } else {
+        format!("{address}:{}", portglass_proto::DEFAULT_RELAY_PORT)
+    };
+    if ProbeConfig::load(path)?.relay.is_some() {
+        bail!(
+            "{} already has a [relay] section; edit it there",
+            path.display()
+        );
+    }
+    append_block(
+        path,
+        &format!(
+            "[relay]
+address = {}
+fingerprint = \"{fp}\"
+",
+            toml_str(&address)
+        ),
+    )?;
+    println!("This probe will register with the relay at {address}.");
+    println!("Restart the probe to apply it. The relay's administrator must also run:");
+    println!(
+        "  portglass-relay authorize --name <this probe> --fingerprint <this probe's fingerprint>"
+    );
+    Ok(())
+}
+
 fn print_policy(cfg: &ProbeConfig) {
     println!("Probe:        {}", cfg.name);
     println!("Listen:       {}", cfg.listen);
+    if let Some(r) = &cfg.relay {
+        println!("Relay:        {} ({})", r.address, r.fingerprint.short());
+    }
     println!("Audit log:    {}", cfg.audit_log.display());
     println!(
         "Limits:       sessions {}, streams/session {}, max TTL {}s, idle {}s",
@@ -363,7 +411,7 @@ fn first_run_setup(path: &Path) -> Result<()> {
     let id = Identity::load(&cfg.identity_dir, "probe")?;
     println!("PortGlass Probe setup");
     println!("=====================");
-    println!("Nobody can connect to this probe yet. Two questions, then it starts.");
+    println!("Nobody can connect to this probe yet. A few questions, then it starts.");
     println!("(Press Enter on a blank line to skip a step; you can change all of this later");
     println!(" in {}.)", path.display());
     println!();
@@ -416,16 +464,42 @@ fn first_run_setup(path: &Path) -> Result<()> {
         }
         println!();
     }
+    if cfg.relay.is_none() {
+        println!("3. Is the technician on another network (not this LAN or a VPN)?");
+        println!("   If you run a PortGlass Relay, enter its address and fingerprint.");
+        loop {
+            let address = prompt("   Relay address (blank to skip): ")?;
+            if address.is_empty() {
+                break;
+            }
+            let fp = prompt("   Relay fingerprint: ")?;
+            match use_relay(path, &address, &fp) {
+                Ok(()) => break,
+                Err(e) => println!("   Not saved: {e:#}. Try again, or press Enter to skip."),
+            }
+        }
+        println!();
+    }
     let cfg = ProbeConfig::load(path)?;
     let port = cfg
         .listen
         .rsplit_once(':')
         .map(|(_, p)| p)
         .unwrap_or("47100");
-    println!("3. On the technician's PC, in Add probe, enter:");
+    println!("4. On the technician's PC, in Add probe, enter:");
     println!("   Name:        {}", cfg.name);
     println!("   Address:     {}:{port}", local_address_hint());
     println!("   Fingerprint: {}", id.fingerprint);
+    if let Some(r) = &cfg.relay {
+        println!("   Off-site technicians: open \"Connect through a relay\" and enter");
+        println!("   Relay address:     {}", r.address);
+        println!("   Relay fingerprint: {}", r.fingerprint);
+        println!("   The relay's administrator must authorize this probe:");
+        println!(
+            "   portglass-relay authorize --name {} --fingerprint {}",
+            cfg.name, id.fingerprint
+        );
+    }
     println!();
     Ok(())
 }

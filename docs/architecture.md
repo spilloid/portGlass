@@ -12,16 +12,18 @@ dedicated browser, for a limited time. This document describes how; the
 | `portglass-core` | — | Identities and fingerprints, pinned mutual TLS (rustls), the byte bridge, the audit log. |
 | `portglass-probe` | `portglass-probe.exe` | Runs at the remote site. Policy, sessions, forwarding. |
 | `portglass-controller` | `portglass.exe` | Runs on the technician's PC. State machine, local tunnel, browser, status window. |
+| `portglass-relay` | `portglass-relay` | Optional, for probes and controllers that can't reach each other: pairs them and splices their end-to-end encrypted connection. Linux or Windows. |
 | `portglass-mock-target` | `portglass-mock-target.exe` | Test device: HTML, JS, forms, cookies, WebSocket, binary, HTTPS. Never deployed. |
 
 Deliberately not used: a custom cipher or handshake (rustls does TLS 1.3), a VPN or virtual
 adapter, routing or DNS changes, a SOCKS/HTTP proxy, Tauri or a bundled Chromium. The controller
-window is a small local web page shown in a Chrome app window, which kept v0.1.0 to one
+window is a small local web page shown in a Chrome app window, which kept PortGlass to one
 toolchain (Rust) and one browser dependency the technician already has.
 
 ## Connections
 
-All connections go from the controller to the probe's one port (default 47100) and are TLS 1.3
+All connections go from the controller to the probe's one port (default 47100), or through a
+[relay](#relay-mode) to the same probe, and are TLS 1.3
 with **mutual** certificate authentication. Each side has a self-signed ECDSA P-256 certificate;
 trust is the SHA-256 fingerprint of the other side's certificate, exchanged out of band — the
 SSH `known_hosts`/`authorized_keys` model, carried by rustls. Possession of the private key is
@@ -125,15 +127,40 @@ four commands (connect, disconnect, dismiss, open browser) plus "check probes". 
 needs the per-launch random token, an exact `Host` header (blocks DNS rebinding), a same-origin
 `Origin` if present, and JSON bodies for POSTs. Closing the window ends every session and exits.
 
-## Relay mode (designed, not built)
+## Relay mode
 
-Both ends already treat "how do I get a byte stream to the probe" as a single seam:
-`ProbeLink::connect` and `ProbeLink::open_stream` in the controller, `accept_loop` in the probe.
-A relay would be a rendezvous service that both sides dial *outbound*; it would splice a
-controller's TCP stream to a probe's, and the mutual TLS described above would run end to end
-*through* it — the relay would see ciphertext and connection metadata only, and could not
-impersonate either side because it holds neither certificate. Building it needs: probe-side
-outbound registration, relay authentication of both parties, and abuse limits. Not in v0.1.0.
+When the technician can't reach the probe's port, both sides dial **out** to a
+`portglass-relay` (crate `portglass-relay`) that both can reach. The connection seam is the
+controller's `client::transport` (TCP to `address`, or a relay pairing) and the probe's
+`server::serve`, which runs a direct or relayed stream through the same TLS acceptor, allowlist
+re-check and ALPN dispatch.
+
+Every relay connection is TLS 1.3 to the relay, pinned to the relay's fingerprint, with the
+dialer's own PortGlass certificate as client certificate. ALPN selects the kind
+(`portglass_proto::relay`):
+
+| ALPN | From | Content |
+|---|---|---|
+| `portglass-relay-register/1` | probe, one long-lived | `Register{controllers}` (its own `[[controller]]` fingerprints, re-sent when they change); relay sends `Registered`, `Incoming{ticket}`, `Pong`, or `Refused` |
+| `portglass-relay-connect/1` | controller, per connection | `Connect{probe}` then `Connected` or `Unavailable` |
+| `portglass-relay-accept/1` | probe, per announced ticket | `Accept{ticket}` |
+
+```
+controller ── Connect{probe fp} ──▶ relay ── Incoming{ticket} ──▶ probe (registration)
+                                    relay ◀── Accept{ticket} ──── probe (new connection)
+controller ◀── Connected ────────── relay: splice the two connections
+controller ═══════ ordinary PortGlass mutual TLS, control or data ══════▶ probe
+```
+
+The relay pairs a controller only with a registered probe (listed in `relay.toml`) whose
+published list contains that controller, so strangers can't use it to reach probes or to
+relay their own traffic. Tickets are random 128 bit, bound to their probe, and expire after
+`answer_timeout_secs`. The relay's checks are an admission filter. The security boundary is
+still the end-to-end mutual TLS and the probe's own policy, which apply to relayed connections
+unchanged. Each browser connection is its own pairing, like each direct data stream is its own
+TCP connection. The probe keeps its registration with 15 s pings, reconnects with backoff up to
+30 s, and re-publishes its controller list within ~2 s of a configuration change. Operator
+guide: [relay.md](relay.md).
 
 ## Configuration files
 

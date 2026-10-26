@@ -17,6 +17,9 @@ Read [`docs/architecture.md`](docs/architecture.md) and
   process launching, persistence, or a way for a data stream to choose its destination.
 - **Enforce at the probe.** Anything the controller's UI restricts must also be enforced by the
   probe's policy.
+- **The relay is an admission filter, never a trust anchor.** It must not terminate, inspect or
+  log the PortGlass TLS it splices, and no check may be moved from the probe or controller to
+  the relay. Relayed connections go through the probe's same `serve()` path as direct ones.
 - **Never weaken the browser.** No certificate, sandbox or security flags; no `--test-type` or
   anything else that hides Chrome's own notices; no global proxy or default-browser changes; never
   the technician's own profile. Don't bundle Chromium (D-0049 direction).
@@ -92,4 +95,8 @@ Dated claims that no automated check covers yet (STD-003 rule 4):
 - **2026-10-24** — The security/concurrency code has had a same-family (Opus) adversarial review
   only. Cross-family Codex Sol review is pending (dev-process row 7).
 - **2026-10-24** — EDR behavior is unobserved. No security product has been run against PortGlass.
-- **2026-10-24** — Signing is wired but unconfigured for this repository; no signed build exists.
+- **2026-10-25** — Windows releases v0.1.0 and v0.2.0 are signed (Azure Artifact Signing) and were
+  verified from the public asset. The Linux relay is unsigned (SHA-256 only).
+- **2026-10-25** — Relay mode is verified on loopback only (`tests/relay.rs`, plus a live run of
+  the release binaries including a relay restart). No trial yet across real NAT, the internet,
+  or a VPS; the Linux musl build is verified only by CI.

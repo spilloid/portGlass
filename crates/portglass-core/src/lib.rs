@@ -5,10 +5,12 @@
 //!   `known_hosts` / `authorized_keys` model, carried by rustls instead of a custom protocol).
 //! * [`bridge`] — the bidirectional byte pump used on both ends of a forwarded connection.
 //! * [`audit`] — append-only JSON-lines audit log. Never receives payload bytes.
+//! * [`relay`] — dialing a relay, for probes and controllers that cannot reach each other.
 
 pub mod audit;
 pub mod bridge;
 pub mod identity;
+pub mod relay;
 pub mod tls;
 
 /// Current UTC time as RFC 3339, for audit records and UI timestamps.

@@ -158,6 +158,7 @@ async fn real_browser_session_through_the_tunnel() {
         name: "lab".into(),
         address: probe.addr.to_string(),
         fingerprint: probe_id.fingerprint,
+        relay: None,
     }];
     let ctrl = Controller::new(
         cfg,

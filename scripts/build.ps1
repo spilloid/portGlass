@@ -5,7 +5,8 @@ Builds PortGlass for Windows x64.
 .DESCRIPTION
 Stages exist so release binaries can be Authenticode-signed between compiling and zipping: the
 published SHA-256 has to cover the signed binaries.
-  build    compile dist\portglass.exe, dist\portglass-probe.exe, dist\portglass-mock-target.exe
+  build    compile dist\portglass.exe, dist\portglass-probe.exe, dist\portglass-relay.exe,
+           dist\portglass-mock-target.exe
   package  zip the two product binaries with README, LICENSE, docs, examples and scripts; write .sha256
   all      build then package (default)
 CI runs `build`, signs with .github/actions/sign-release, then runs `package`.
@@ -44,7 +45,7 @@ try {
         return
     }
 
-    $products = @('portglass.exe', 'portglass-probe.exe')
+    $products = @('portglass.exe', 'portglass-probe.exe', 'portglass-relay.exe')
     New-Item -ItemType Directory -Force dist | Out-Null
 
     if ($Stage -in 'all', 'build') {
