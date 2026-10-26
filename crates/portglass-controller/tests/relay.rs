@@ -463,6 +463,15 @@ async fn one_address_cannot_hold_every_unpaired_slot() {
     // Review finding: after the handshake, any certificate could hold CONNECT sockets without
     // sending a frame. An attacker on 127.0.0.2 fills its per-address budget; the next one is
     // dropped, and a technician on 127.0.0.1 still gets through.
+    //
+    // Needs a second loopback address: Windows and Linux route all of 127/8, macOS only
+    // configures 127.0.0.1 unless an alias is added.
+    let probe_sock = tokio::net::TcpSocket::new_v4().unwrap();
+    if probe_sock.bind("127.0.0.2:0".parse().unwrap()).is_err() {
+        eprintln!("skipped: 127.0.0.2 is not available on this host");
+        return;
+    }
+    drop(probe_sock);
     let h = Harness::new(true).await;
     let (stranger, _, _) = Identity::generate("controller", "mallory").unwrap();
     let cfg = portglass_core::tls::client_config(
