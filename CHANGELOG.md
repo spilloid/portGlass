@@ -3,7 +3,7 @@
 All notable changes to PortGlass. Versions follow [semver](https://semver.org/); the version in
 `Cargo.toml` (`[workspace.package]`) is authoritative.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-10-25
 
 ### Added
 - **Relay mode, for technicians on other networks.** A new program, `portglass-relay`, runs on a
