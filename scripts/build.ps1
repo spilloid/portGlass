@@ -7,7 +7,7 @@ Stages exist so release binaries can be Authenticode-signed between compiling an
 published SHA-256 has to cover the signed binaries.
   build    compile dist\portglass.exe, dist\portglass-probe.exe, dist\portglass-relay.exe,
            dist\portglass-mock-target.exe
-  package  zip the two product binaries with README, LICENSE, docs, examples and scripts; write .sha256
+  package  zip the product binaries with README, LICENSE, docs, examples and scripts; write .sha256
   all      build then package (default)
 CI runs `build`, signs with .github/actions/sign-release, then runs `package`.
 Without -Release, builds the debug profile into target\ only (no dist\).
@@ -78,7 +78,8 @@ try {
             }
         } finally { $zip.Dispose() }
         $hash = (Get-FileHash $assetPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        "$hash  $asset" | Out-File "$assetPath.sha256" -Encoding ascii
+        # LF, not CRLF: `sha256sum -c` would otherwise look for a file named "<asset>\r".
+        [IO.File]::WriteAllText("$assetPath.sha256", "$hash  $asset`n", [Text.Encoding]::ASCII)
         Write-Output $assetPath
     }
 } finally {
