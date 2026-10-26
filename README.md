@@ -60,10 +60,10 @@ Setup takes about ten minutes: [docs/relay.md](docs/relay.md).
 
 ## Quick start
 
-**[Download PortGlass for Windows](https://github.com/spilloid/portGlass/releases/latest)** — one zip with both programs. No installer, no admin rights, no scripts.
+**[Download PortGlass for Windows](https://github.com/spilloid/portGlass/releases/latest)** — one zip with the technician program, the probe, and the optional relay. No installer, no admin rights, no scripts. The Linux relay for a VPS is a separate download on the same page.
 
 1. **On your PC**, unzip and double-click **`portglass.exe`**. The PortGlass window opens and shows *Add a probe* with your fingerprint.
-2. **On a computer at the remote site**, double-click **`portglass-probe.exe`**. It sets itself up and asks two questions in its window: paste your fingerprint (who may connect), and type the device to allow, like `192.168.1.50:80`. It then prints its own name, address and fingerprint. Allow it through Windows Firewall when asked — ideally only for your network.
+2. **On a computer at the remote site**, double-click **`portglass-probe.exe`**. It sets itself up and asks a few questions in its window: paste your fingerprint (who may connect), type the device to allow, like `192.168.1.50:80`, and, if you are on another network, the relay to use (Enter skips it). It then prints its own name, address and fingerprint. Allow it through Windows Firewall when asked — ideally only for your network.
 3. **Back in the PortGlass window**, enter what the probe printed and press **Add probe**. Pick it, type `192.168.1.50:80`, and press **Connect**. The light goes red → amber → green and the device's own page opens in a separate window. **End session** (or closing that window) closes the tunnel and deletes the browser's data.
 
 Everything can also be done from a terminal:
@@ -160,7 +160,7 @@ Full list: [docs/security-model.md#known-limitations](docs/security-model.md#kno
 ```powershell
 cargo test --workspace                                         # unit + integration
 cargo test -p portglass-controller -- --ignored                # real Chrome: e2e + UI capture
-./scripts/build.ps1 -Release                                   # dist\ with both binaries
+./scripts/build.ps1 -Release                                   # dist\ with the binaries
 ```
 
 How work is routed and reviewed: [CLAUDE.md](CLAUDE.md), [docs/dev-process.md](docs/dev-process.md).
