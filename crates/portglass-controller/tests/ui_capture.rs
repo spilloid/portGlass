@@ -170,11 +170,13 @@ async fn controller_window_renders_cleanly_in_every_state() {
             name: "front-office".into(),
             address: probe.addr.to_string(),
             fingerprint: probe_id.fingerprint,
+            relay: None,
         },
         ProbeEntry {
             name: "warehouse".into(),
             address: "127.0.0.1:9".into(),
             fingerprint: probe_id.fingerprint,
+            relay: None,
         },
     ];
     let ctrl = Controller::new(

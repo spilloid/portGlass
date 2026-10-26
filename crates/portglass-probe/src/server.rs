@@ -22,6 +22,10 @@ use portglass_core::audit::AuditLog;
 use portglass_core::bridge::{bridge, Counters};
 use portglass_core::identity::{Fingerprint, Identity};
 use portglass_core::tls::{self, ControllerAllowlist};
+use portglass_proto::relay::{
+    Accept, ProbeEvent, ProbeRequest, ALPN_ACCEPT, ALPN_REGISTER, MAX_PUBLISHED_CONTROLLERS,
+    RELAY_PROTOCOL_VERSION,
+};
 use portglass_proto::{
     read_frame, write_frame, ControlEvent, ControlRequest, EndReason, ErrorCode, FrameError,
     PolicySummary, StreamOpen, StreamReply, ALPN_CONTROL, ALPN_DATA, PROTOCOL_VERSION,
@@ -33,7 +37,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::ProbeConfig;
+use crate::config::{ProbeConfig, RelayEntry};
 use crate::policy;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -188,6 +192,9 @@ impl ProbeHandle {
                 if new.listen != self.config().listen {
                     tracing::warn!("`listen` changed; restart the probe to apply it");
                 }
+                if new.relay != self.config().relay {
+                    tracing::warn!("[relay] changed; restart the probe to apply it");
+                }
                 tracing::info!("configuration reloaded");
                 self.apply_config(new);
                 true
@@ -275,6 +282,14 @@ pub async fn start(
             ("allow_rules", json!(cfg.allow.len())),
         ],
     );
+    if let Some(relay) = cfg.relay.clone() {
+        tokio::spawn(relay_loop(
+            shared.clone(),
+            identity.clone(),
+            acceptor.clone(),
+            relay,
+        ));
+    }
     let task = tokio::spawn(accept_loop(listener, acceptor, shared.clone()));
     Ok(ProbeHandle { addr, shared, task })
 }
@@ -305,40 +320,300 @@ async fn accept_loop(listener: TcpListener, acceptor: TlsAcceptor, shared: Arc<S
             continue;
         };
         let _ = tcp.set_nodelay(true);
-        let acceptor = acceptor.clone();
-        let shared = shared.clone();
-        tokio::spawn(async move {
-            let tls = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
-                Ok(Ok(tls)) => tls,
-                Ok(Err(e)) => {
-                    tracing::info!("TLS handshake with {peer} failed: {e}");
-                    return;
-                }
-                Err(_) => {
-                    tracing::info!("TLS handshake with {peer} timed out");
-                    return;
-                }
-            };
-            drop(permit);
-            drop(slot);
-            let (_, conn) = tls.get_ref();
-            let alpn = conn.alpn_protocol().map(|a| a.to_vec());
-            let Some(fp) = tls::peer_fingerprint(conn) else {
-                return;
-            };
-            // Load-bearing: re-check the live allowlist after every handshake, independent of the
-            // TLS verifier (which also checks it, and which session resumption would skip — it is
-            // disabled in portglass_core::tls::server_config, and this check backs that up).
-            let Some(operator) = shared.config().controller_name(&fp).map(str::to_owned) else {
-                return;
-            };
-            match alpn.as_deref() {
-                Some(a) if a == ALPN_CONTROL => run_control(shared, tls, fp, operator, peer).await,
-                Some(a) if a == ALPN_DATA => run_data(shared, tls, fp, peer).await,
-                _ => tracing::info!("{peer} negotiated no PortGlass protocol; closing"),
-            }
-        });
+        tokio::spawn(serve(
+            shared.clone(),
+            acceptor.clone(),
+            tcp,
+            peer,
+            (permit, slot),
+        ));
     }
+}
+
+/// Authenticate one connection — direct, or spliced by a relay — and run it. `pending` is held
+/// until the handshake completes.
+async fn serve<S, P>(
+    shared: Arc<Shared>,
+    acceptor: TlsAcceptor,
+    io: S,
+    peer: SocketAddr,
+    pending: P,
+) where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    P: Send + 'static,
+{
+    let tls = match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(io)).await {
+        Ok(Ok(tls)) => tls,
+        Ok(Err(e)) => {
+            tracing::info!("TLS handshake with {peer} failed: {e}");
+            return;
+        }
+        Err(_) => {
+            tracing::info!("TLS handshake with {peer} timed out");
+            return;
+        }
+    };
+    drop(pending);
+    let (_, conn) = tls.get_ref();
+    let alpn = conn.alpn_protocol().map(|a| a.to_vec());
+    let Some(fp) = tls::peer_fingerprint(conn) else {
+        return;
+    };
+    // Load-bearing: re-check the live allowlist after every handshake, independent of the
+    // TLS verifier (which also checks it, and which session resumption would skip — it is
+    // disabled in portglass_core::tls::server_config, and this check backs that up).
+    let Some(operator) = shared.config().controller_name(&fp).map(str::to_owned) else {
+        return;
+    };
+    match alpn.as_deref() {
+        Some(a) if a == ALPN_CONTROL => run_control(shared, tls, fp, operator, peer).await,
+        Some(a) if a == ALPN_DATA => run_data(shared, tls, fp, peer).await,
+        _ => tracing::info!("{peer} negotiated no PortGlass protocol; closing"),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Relay registration
+// ---------------------------------------------------------------------------------------------
+
+const RELAY_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+const RELAY_PING: Duration = Duration::from_secs(15);
+const RELAY_SILENCE: Duration = Duration::from_secs(45);
+const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+fn published_controllers(cfg: &ProbeConfig) -> Vec<String> {
+    cfg.controllers
+        .iter()
+        .take(MAX_PUBLISHED_CONTROLLERS)
+        .map(|c| c.fingerprint.to_string())
+        .collect()
+}
+
+/// Keep this probe registered with its relay, reconnecting with backoff, and answer each
+/// controller the relay announces by dialing back and serving that connection like any other.
+async fn relay_loop(
+    shared: Arc<Shared>,
+    identity: Identity,
+    acceptor: TlsAcceptor,
+    relay: RelayEntry,
+) {
+    let pending = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        let outcome = tokio::select! {
+            _ = shared.shutdown.cancelled() => return,
+            r = relay_session(&shared, &identity, &acceptor, &relay, &pending) => r,
+        };
+        let wait = match outcome {
+            RelayOutcome::Lost(why) => {
+                tracing::warn!("relay {}: {why}; reconnecting", relay.address);
+                // A registration that worked resets the backoff.
+                std::mem::replace(&mut backoff, Duration::from_secs(1))
+            }
+            RelayOutcome::Failed(why) => {
+                tracing::warn!(
+                    "relay {}: {why}; retrying in {}s",
+                    relay.address,
+                    backoff.as_secs()
+                );
+                let w = backoff;
+                backoff = (backoff * 2).min(RELAY_BACKOFF_MAX);
+                w
+            }
+            RelayOutcome::Refused(why) => {
+                tracing::error!("relay {} refused this probe: {why}", relay.address);
+                shared.audit.record(
+                    "relay_refused",
+                    &[("relay", json!(relay.address)), ("message", json!(why))],
+                );
+                backoff = RELAY_BACKOFF_MAX;
+                RELAY_BACKOFF_MAX
+            }
+        };
+        tokio::select! {
+            _ = shared.shutdown.cancelled() => return,
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+enum RelayOutcome {
+    /// Never registered.
+    Failed(String),
+    /// Registered, then lost.
+    Lost(String),
+    Refused(String),
+}
+
+async fn relay_session(
+    shared: &Arc<Shared>,
+    identity: &Identity,
+    acceptor: &TlsAcceptor,
+    relay: &RelayEntry,
+    pending: &Arc<Semaphore>,
+) -> RelayOutcome {
+    let mut stream = match portglass_core::relay::dial(
+        &relay.address,
+        relay.fingerprint,
+        identity,
+        ALPN_REGISTER,
+        RELAY_DIAL_TIMEOUT,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => return RelayOutcome::Failed(e.to_string()),
+    };
+    let relay_peer = stream
+        .get_ref()
+        .0
+        .peer_addr()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+    let mut published = published_controllers(&shared.config());
+    let register = ProbeRequest::Register {
+        protocol: RELAY_PROTOCOL_VERSION,
+        controllers: published.clone(),
+    };
+    let first = async {
+        write_frame(&mut stream, &register).await?;
+        read_frame::<_, ProbeEvent>(&mut stream).await
+    };
+    let relay_name = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, first).await {
+        Ok(Ok(ProbeEvent::Registered { relay_name })) => relay_name,
+        Ok(Ok(ProbeEvent::Refused { message })) => return RelayOutcome::Refused(message),
+        // Only the kind: an unexpected `Incoming` carries a ticket, which must not be logged.
+        Ok(Ok(_)) => return RelayOutcome::Failed("unexpected reply to registration".into()),
+        Ok(Err(e)) => return RelayOutcome::Failed(format!("registration failed: {e}")),
+        Err(_) => return RelayOutcome::Failed("the relay did not answer".into()),
+    };
+    tracing::info!("Registered with relay {relay_name} ({})", relay.address);
+    shared.audit.record(
+        "relay_registered",
+        &[
+            ("relay", json!(relay_name)),
+            ("address", json!(relay.address)),
+        ],
+    );
+
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    // read_frame is not cancel-safe, so frames are read on their own task.
+    let (ev_tx, mut ev_rx) = mpsc::channel::<Result<ProbeEvent, FrameError>>(16);
+    let reader = tokio::spawn(async move {
+        loop {
+            let r = read_frame::<_, ProbeEvent>(&mut rd).await;
+            let stop = r.is_err();
+            if ev_tx.send(r).await.is_err() || stop {
+                return;
+            }
+        }
+    });
+    let _reader = AbortOnDrop(reader);
+    let mut ping = tokio::time::interval(RELAY_PING);
+    ping.tick().await;
+    let mut recheck = tokio::time::interval(Duration::from_secs(2));
+    let mut last_heard = Instant::now();
+    let mut nonce = 0u64;
+    loop {
+        tokio::select! {
+            ev = ev_rx.recv() => {
+                last_heard = Instant::now();
+                match ev {
+                    Some(Ok(ProbeEvent::Incoming { ticket })) => {
+                        let Ok(permit) = pending.clone().try_acquire_owned() else {
+                            tracing::warn!("ignoring a relayed connection: too many pending handshakes");
+                            continue;
+                        };
+                        tokio::spawn(answer_ticket(
+                            shared.clone(),
+                            identity.clone(),
+                            acceptor.clone(),
+                            relay.clone(),
+                            ticket,
+                            relay_peer,
+                            permit,
+                        ));
+                    }
+                    Some(Ok(ProbeEvent::Pong { .. })) | Some(Ok(ProbeEvent::Registered { .. })) => {}
+                    Some(Ok(ProbeEvent::Refused { message })) => return RelayOutcome::Refused(message),
+                    Some(Err(e)) => return RelayOutcome::Lost(format!("registration closed: {e}")),
+                    None => return RelayOutcome::Lost("registration closed".into()),
+                }
+            }
+            _ = ping.tick() => {
+                if last_heard.elapsed() > RELAY_SILENCE {
+                    return RelayOutcome::Lost("the relay went silent".into());
+                }
+                nonce += 1;
+                if !relay_send(&mut wr, &ProbeRequest::Ping { nonce }).await {
+                    return RelayOutcome::Lost("could not reach the relay".into());
+                }
+            }
+            _ = recheck.tick() => {
+                // Keep the relay's admission filter in step with this probe's own allowlist.
+                let now = published_controllers(&shared.config());
+                if now != published {
+                    published = now;
+                    let update = ProbeRequest::Register {
+                        protocol: RELAY_PROTOCOL_VERSION,
+                        controllers: published.clone(),
+                    };
+                    if !relay_send(&mut wr, &update).await {
+                        return RelayOutcome::Lost("could not reach the relay".into());
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn relay_send<W: AsyncWrite + Unpin>(wr: &mut W, req: &ProbeRequest) -> bool {
+    matches!(
+        tokio::time::timeout(WRITE_TIMEOUT, write_frame(wr, req)).await,
+        Ok(Ok(()))
+    )
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Dial back to the relay for one announced controller, then serve that connection exactly as
+/// if it had arrived on `listen`: the controller still has to pass this probe's own mutual TLS
+/// and allowlist.
+async fn answer_ticket(
+    shared: Arc<Shared>,
+    identity: Identity,
+    acceptor: TlsAcceptor,
+    relay: RelayEntry,
+    ticket: String,
+    relay_peer: SocketAddr,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let mut stream = match portglass_core::relay::dial(
+        &relay.address,
+        relay.fingerprint,
+        &identity,
+        ALPN_ACCEPT,
+        RELAY_DIAL_TIMEOUT,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::info!("answering a relayed connection failed: {e}");
+            return;
+        }
+    };
+    if !matches!(
+        tokio::time::timeout(WRITE_TIMEOUT, write_frame(&mut stream, &Accept { ticket })).await,
+        Ok(Ok(()))
+    ) {
+        return;
+    }
+    serve(shared, acceptor, stream, relay_peer, permit).await;
 }
 
 // ---------------------------------------------------------------------------------------------

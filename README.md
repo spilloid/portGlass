@@ -3,7 +3,7 @@
 **Operate one web interface on a remote LAN as if it were on your desk — without a VPN, remote
 desktop, or routing a whole network.**
 
-PortGlass v0.2.0 · Windows, and macOS (Apple silicon) for the technician · MIT · [Docs site](https://spilloid.github.io/portGlass/)
+PortGlass v0.3.0 · Windows, and macOS (Apple silicon) for the technician · relay for Linux · MIT · [Docs site](https://spilloid.github.io/portGlass/)
 
 A technician picks a probe, types `192.168.1.50:80`, and a dedicated, isolated browser window
 opens on the printer's real web interface. Closing the session closes the tunnel and deletes
@@ -36,21 +36,34 @@ everything the browser stored.
 Details: [architecture](docs/architecture.md) · [security model and threat analysis](docs/security-model.md)
 · [deployment, firewall and EDR guidance](docs/deployment.md) · [troubleshooting](docs/troubleshooting.md).
 
+### Not on the same network: the relay
+
+When the probe is behind a NAT router and there is no VPN, run **`portglass-relay`** on a server
+both sides can reach. The probe and the technician each dial *out* to it. The relay pairs them
+and copies their end-to-end encrypted connection, so it can't read or alter anything in it.
+Setup takes about ten minutes: [docs/relay.md](docs/relay.md).
+
+```
+ Technician PC ──outbound──▶ PortGlass Relay (VPS, TCP 47200) ◀──outbound── Probe (behind NAT)
+       └──────────── the same mutual TLS as a direct connection ────────────────┘
+```
+
 ## Requirements
 
 - **Probe:** Windows 10 or 11 (x64).
 - **Technician:** Windows 10 or 11 (x64), or macOS 13+ on Apple silicon (preview — see below).
 - Google Chrome installed on the technician's PC. PortGlass does not bundle a browser.
 - The technician's PC must reach the probe's TCP port (default 47100): same LAN, or an existing
-  authorized VPN. Relay mode for NAT-to-NAT is designed for but not built in v0.1.0.
+  authorized VPN. **Or**, for sites you can't reach that way, a [PortGlass Relay](docs/relay.md)
+  that both sides can reach, e.g. a small Linux VPS.
 - To build from source: Rust (stable, MSVC target) and Visual Studio Build Tools.
 
 ## Quick start
 
-**[Download PortGlass for Windows](https://github.com/spilloid/portGlass/releases/latest)** — one zip with both programs. No installer, no admin rights, no scripts.
+**[Download PortGlass for Windows](https://github.com/spilloid/portGlass/releases/latest)** — one zip with the technician program, the probe, and the optional relay. No installer, no admin rights, no scripts. The Linux relay for a VPS is a separate download on the same page.
 
 1. **On your PC**, unzip and double-click **`portglass.exe`**. The PortGlass window opens and shows *Add a probe* with your fingerprint.
-2. **On a computer at the remote site**, double-click **`portglass-probe.exe`**. It sets itself up and asks two questions in its window: paste your fingerprint (who may connect), and type the device to allow, like `192.168.1.50:80`. It then prints its own name, address and fingerprint. Allow it through Windows Firewall when asked — ideally only for your network.
+2. **On a computer at the remote site**, double-click **`portglass-probe.exe`**. It sets itself up and asks a few questions in its window: paste your fingerprint (who may connect), type the device to allow, like `192.168.1.50:80`, and, if you are on another network, the relay to use (Enter skips it). It then prints its own name, address and fingerprint. Allow it through Windows Firewall when asked — ideally only for your network.
 3. **Back in the PortGlass window**, enter what the probe printed and press **Add probe**. Pick it, type `192.168.1.50:80`, and press **Connect**. The light goes red → amber → green and the device's own page opens in a separate window. **End session** (or closing that window) closes the tunnel and deletes the browser's data.
 
 Everything can also be done from a terminal:
@@ -67,7 +80,7 @@ portglass connect --probe front-office --target 192.168.1.50:80
 
 ### On a Mac
 
-Download `portglass-v0.2.0-macos-arm64.tar.gz` from the release, double-click it to unpack, and open the `portglass` program inside. The Mac build isn't notarized by Apple yet, so the first time macOS refuses to open it: **right-click → Open → Open**, or run `xattr -d com.apple.quarantine portglass` in Terminal. The window and the session browser work as on Windows (Chrome required); it connects to the same Windows probes.
+Download `portglass-v0.3.0-macos-arm64.tar.gz` from the release, double-click it to unpack, and open the `portglass` program inside. The Mac build isn't notarized by Apple yet, so the first time macOS refuses to open it: **right-click → Open → Open**, or run `xattr -d com.apple.quarantine portglass` in Terminal. The window and the session browser work as on Windows (Chrome required); it connects to the same Windows probes.
 
 For an administrator-managed install of the probe (Program Files, locked-down ProgramData,
 Start menu shortcut, scoped firewall rule) see [deployment](docs/deployment.md).
@@ -100,7 +113,7 @@ The demo creates throwaway identities under `%TEMP%`, starts a mock printer inte
 | `portglass` | Open the PortGlass window |
 | `portglass init [--operator NAME]` | Create this controller's identity and config |
 | `portglass fingerprint` | Print this controller's fingerprint |
-| `portglass probe add/list/remove` | Manage pinned probes |
+| `portglass probe add/list/remove` | Manage pinned probes (`add --relay H:PORT --relay-fingerprint F` for a relayed probe) |
 | `portglass connect --probe P --target H:PORT [--no-browser]` | Session from the terminal |
 | `portglass diag` | Check config, identity, Chrome, and every probe |
 
@@ -113,12 +126,21 @@ The demo creates throwaway identities under `%TEMP%`, starts a mock printer inte
 | `portglass-probe check-config` | Show the effective policy |
 | `portglass-probe diag --target H:PORT` | Check policy and reachability from the probe |
 | `portglass-probe fingerprint` | Print the probe's fingerprint |
+| `portglass-probe use-relay --address H:PORT --fingerprint F` | Register with a relay (restart to apply) |
 
-Examples of both configuration files: [`examples/`](examples/).
+| Relay (`portglass-relay`, Linux or Windows) | |
+|---|---|
+| `portglass-relay init [--name NAME]` | Create config and identity; prints the relay fingerprint |
+| `portglass-relay run` | Run in this console (default; SIGTERM-aware for systemd) |
+| `portglass-relay authorize --name N --fingerprint F` | Let a probe register |
+| `portglass-relay check-config` / `fingerprint` | Show config / print the fingerprint |
 
-## Known limitations (v0.1.0)
+Examples of every configuration file: [`examples/`](examples/).
 
-- **Direct mode only.** The technician must be able to reach the probe's port. No relay yet.
+## Known limitations (v0.3.0)
+
+- **The relay sees metadata.** Which probe and controller fingerprints meet, when, from where, and
+  how many bytes. It never sees content. Run it on a machine you control.
 - **One target port per session.** A device that serves assets or redirects across ports
   (80 ↔ 443, a separate WebSocket port) needs a session per port; PortGlass tells you when it
   sees the redirect.
@@ -128,8 +150,8 @@ Examples of both configuration files: [`examples/`](examples/).
   PortGlass never hides it. Set `preserve_address = false` to avoid the flag (see
   [security model](docs/security-model.md#browser-address-mapping)).
 - **No Windows service yet.** The probe runs in a visible console by design for v0.1.0.
-- **Unsigned development builds.** Release builds are signed in CI once signing is configured
-  for this repository; see [deployment](docs/deployment.md#code-signing).
+- **Signed Windows binaries only.** Windows release builds are Authenticode-signed. The macOS
+  controller is not notarized, and the Linux relay is checked by its published SHA-256.
 
 Full list: [docs/security-model.md#known-limitations](docs/security-model.md#known-limitations).
 
@@ -138,7 +160,7 @@ Full list: [docs/security-model.md#known-limitations](docs/security-model.md#kno
 ```powershell
 cargo test --workspace                                         # unit + integration
 cargo test -p portglass-controller -- --ignored                # real Chrome: e2e + UI capture
-./scripts/build.ps1 -Release                                   # dist\ with both binaries
+./scripts/build.ps1 -Release                                   # dist\ with the binaries
 ```
 
 How work is routed and reviewed: [CLAUDE.md](CLAUDE.md), [docs/dev-process.md](docs/dev-process.md).

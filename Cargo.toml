@@ -6,10 +6,11 @@ members = [
     "crates/portglass-probe",
     "crates/portglass-controller",
     "crates/portglass-mock-target",
+    "crates/portglass-relay",
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 authors = ["Joseph Spillers"]
@@ -21,6 +22,7 @@ portglass-proto = { path = "crates/portglass-proto" }
 portglass-core = { path = "crates/portglass-core" }
 portglass-probe = { path = "crates/portglass-probe" }
 portglass-controller = { path = "crates/portglass-controller" }
+portglass-relay = { path = "crates/portglass-relay" }
 
 anyhow = "1"
 thiserror = "2"

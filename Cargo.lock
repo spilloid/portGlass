@@ -717,7 +717,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "portglass-controller"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -729,6 +729,7 @@ dependencies = [
  "portglass-mock-target",
  "portglass-probe",
  "portglass-proto",
+ "portglass-relay",
  "rustls",
  "serde",
  "serde_json",
@@ -748,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "portglass-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -769,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "portglass-mock-target"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -786,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "portglass-probe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -809,12 +810,33 @@ dependencies = [
 
 [[package]]
 name = "portglass-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "portglass-relay"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "portglass-core",
+ "portglass-proto",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "winresource",
 ]
 
 [[package]]

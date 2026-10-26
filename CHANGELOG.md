@@ -3,7 +3,32 @@
 All notable changes to PortGlass. Versions follow [semver](https://semver.org/); the version in
 `Cargo.toml` (`[workspace.package]`) is authoritative.
 
-## 0.2.0 — unreleased
+## 0.3.0 — 2026-10-25
+
+### Added
+- **Relay mode, for technicians on other networks.** A new program, `portglass-relay`, runs on a
+  server both sides can reach (a small Linux VPS is enough; static Linux x64 and signed Windows
+  builds). The probe and the controller each dial *out* to it, so neither needs an open inbound
+  port, a port forward or a VPN. The relay pairs them and copies bytes; the same pinned mutual
+  TLS as a direct connection runs end to end inside, so the relay sees ciphertext and connection
+  metadata only. Only probes listed in `relay.toml` can register, and each probe publishes its
+  own controller allowlist, so the relay pairs only technicians the probe itself accepts.
+  Live configuration reload, fail-closed on an invalid file; handshake, waiting and per-probe
+  pair limits; SIGTERM-aware for systemd (unit file in `examples/`). Guide: `docs/relay.md`.
+- Probe: optional `[relay]` section, `portglass-probe use-relay`, and a relay question in the
+  first-run setup, which then prints the relay details for the technician. The probe keeps its
+  registration alive, reconnects with backoff, and serves relayed connections through exactly
+  the same authentication and policy as direct ones.
+- Controller: probes can be pinned with a relay route (*Add probe → Not on the same network?
+  Connect through a relay*, or `portglass probe add --relay … --relay-fingerprint …`), with
+  errors that say whether the relay, the relay's identity, or the probe's availability is the
+  problem.
+- Tests: relayed sessions end to end (HTTP and a byte-exact 8 MiB download), relay admission
+  (unlisted controller, unlisted probe), the probe's allowlist change reaching the relay,
+  relay identity pinning, end-to-end probe authentication through the relay, and revocation at
+  the relay ending relayed connections.
+
+## 0.2.0 — 2026-10-25
 
 ### Added
 - **macOS controller (Apple silicon, preview).** The technician side runs on macOS 13+ and connects

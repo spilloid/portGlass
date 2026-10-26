@@ -50,6 +50,7 @@ libc = "0.2"
 
 [dev-dependencies]
 portglass-probe.workspace = true
+portglass-relay.workspace = true
 portglass-mock-target = { path = "../portglass-mock-target" }
 tokio-tungstenite = "0.30"
 tempfile = "3"

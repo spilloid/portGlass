@@ -48,6 +48,7 @@ impl Harness {
             name: "lab".into(),
             address: probe.addr.to_string(),
             fingerprint: probe_id.fingerprint,
+            relay: None,
         };
         Harness {
             probe: Some(probe),
@@ -905,6 +906,7 @@ async fn an_invalid_config_file_fails_closed_and_recovers() {
         name: "p".into(),
         address: probe.addr.to_string(),
         fingerprint: probe_id.fingerprint,
+        relay: None,
     };
     let link = ProbeLink::connect(&entry, &ctl, "t").await.unwrap();
     let grant = link

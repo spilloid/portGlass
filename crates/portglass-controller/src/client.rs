@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use portglass_core::identity::{Fingerprint, Identity};
+use portglass_core::relay::{BoxedIo, DialError};
 use portglass_core::tls;
+use portglass_proto::relay as relay_proto;
 use portglass_proto::{
     read_frame, write_frame, ControlEvent, ControlRequest, ErrorCode, FrameError, PolicySummary,
     StreamOpen, StreamReply, TargetSpec, ALPN_CONTROL, ALPN_DATA, PROTOCOL_VERSION,
@@ -18,7 +20,7 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::ProbeEntry;
+use crate::config::{ProbeEntry, RelayRoute};
 use crate::failure::{Failure, FailureKind};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -46,6 +48,7 @@ pub struct ProbeLink {
     pub entry: ProbeEntry,
     pub hello: HelloInfo,
     own_fingerprint: Fingerprint,
+    identity: Identity,
     tx: mpsc::Sender<ControlRequest>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<ControlEvent>>>>,
     pings: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>>,
@@ -88,7 +91,7 @@ impl ProbeLink {
                     "The probe didn't answer",
                     format!(
                         "{} accepted a connection but did not respond in time.",
-                        entry.address
+                        entry.route()
                     ),
                     "Check that the address is a PortGlass Probe and that it is not overloaded.",
                 )),
@@ -107,7 +110,7 @@ impl ProbeLink {
                 policy,
             },
             ControlEvent::Error { code, message } => {
-                return Err(Failure::from_probe(code, &message, &entry.address))
+                return Err(Failure::from_probe(code, &message, &entry.route()))
             }
             other => {
                 return Err(Failure::internal(format!(
@@ -123,6 +126,7 @@ impl ProbeLink {
             entry: entry.clone(),
             hello,
             own_fingerprint: identity.fingerprint,
+            identity: identity.clone(),
             tx,
             pending: Default::default(),
             pings: Default::default(),
@@ -285,15 +289,13 @@ impl ProbeLink {
         &self,
         session_id: &str,
         token: &str,
-    ) -> Result<TlsStream<TcpStream>, (Option<ErrorCode>, String)> {
-        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&self.entry.address))
+    ) -> Result<TlsStream<BoxedIo>, (Option<ErrorCode>, String)> {
+        let io = transport(&self.entry, &self.identity)
             .await
-            .map_err(|_| (None, "connecting to the probe timed out".to_string()))?
-            .map_err(|e| (None, format!("connecting to the probe: {e}")))?;
-        let _ = tcp.set_nodelay(true);
+            .map_err(|f| (None, format!("{}: {}", f.title, f.detail)))?;
         let mut tls = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            self.data_connector.connect(tls::server_name(), tcp),
+            self.data_connector.connect(tls::server_name(), io),
         )
         .await
         .map_err(|_| (None, "TLS handshake with the probe timed out".to_string()))?
@@ -333,11 +335,107 @@ impl Drop for ProbeLink {
     }
 }
 
+/// A byte stream to the probe: a TCP connection, or a relay connection already paired with the
+/// probe. Either way the PortGlass handshake that follows authenticates the probe itself.
+async fn transport(entry: &ProbeEntry, identity: &Identity) -> Result<BoxedIo, Failure> {
+    match &entry.relay {
+        None => Ok(Box::new(connect_tcp(entry).await?)),
+        Some(relay) => Ok(Box::new(connect_via_relay(entry, relay, identity).await?)),
+    }
+}
+
+async fn connect_via_relay(
+    entry: &ProbeEntry,
+    relay: &RelayRoute,
+    identity: &Identity,
+) -> Result<impl portglass_core::relay::Io, Failure> {
+    let mut stream = portglass_core::relay::dial(
+        &relay.address,
+        relay.fingerprint,
+        identity,
+        relay_proto::ALPN_CONNECT,
+        CONNECT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| match e {
+        DialError::Unreachable(detail) => Failure::new(
+            FailureKind::ProbeUnreachable,
+            format!("Can't reach the relay for probe {}", entry.name),
+            detail,
+            "Check the relay address and that the relay is running and its port is open.",
+        ),
+        DialError::WrongIdentity => Failure::new(
+            FailureKind::AuthFailed,
+            "The relay presented the wrong identity",
+            format!(
+                "The server at {} is not the relay you pinned (expected {}).",
+                relay.address,
+                relay.fingerprint.short()
+            ),
+            "Check the relay address and fingerprint with the relay's administrator. Don't \
+             proceed if you didn't expect a change.",
+        ),
+        DialError::Tls(detail) => Failure::new(
+            FailureKind::TlsError,
+            "The secure connection to the relay failed",
+            detail,
+            "Check that the address belongs to a PortGlass Relay of the same version.",
+        ),
+    })?;
+    let ask = relay_proto::Connect {
+        protocol: relay_proto::RELAY_PROTOCOL_VERSION,
+        probe: entry.fingerprint.to_string(),
+    };
+    let exchange = async {
+        write_frame(&mut stream, &ask).await?;
+        read_frame::<_, relay_proto::ConnectReply>(&mut stream).await
+    };
+    match tokio::time::timeout(REPLY_TIMEOUT, exchange).await {
+        Ok(Ok(relay_proto::ConnectReply::Connected)) => Ok(stream),
+        Ok(Ok(relay_proto::ConnectReply::Unavailable { message })) => Err(Failure::new(
+            FailureKind::ProbeUnreachable,
+            format!("Probe {} isn't available through the relay", entry.name),
+            message,
+            format!(
+                "Check that the probe is running and says \"Registered with relay\", and that \
+                 its administrator authorized this controller ({}).",
+                identity.fingerprint.short()
+            ),
+        )),
+        Ok(Err(e)) => Err(Failure::new(
+            FailureKind::NetworkInterrupted,
+            "The relay closed the connection",
+            e.to_string(),
+            "Try again; if it persists, check the relay's console.",
+        )),
+        Err(_) => Err(Failure::new(
+            FailureKind::ProbeUnreachable,
+            "The relay didn't answer",
+            format!("No reply from {} within 20 seconds.", relay.address),
+            "Try again; if it persists, check the relay's console.",
+        )),
+    }
+}
+
 async fn connect_tls(
     connector: &TlsConnector,
     entry: &ProbeEntry,
     identity: &Identity,
-) -> Result<TlsStream<TcpStream>, Failure> {
+) -> Result<TlsStream<BoxedIo>, Failure> {
+    let io = transport(entry, identity).await?;
+    match tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(tls::server_name(), io)).await {
+        Ok(Ok(s)) => Ok(s),
+        Ok(Err(e)) => Err(classify_io(&e, entry, identity)),
+        Err(_) => Err(Failure::new(
+            FailureKind::TlsError,
+            "The secure handshake with the probe timed out",
+            entry.route(),
+            "Check that the address belongs to a PortGlass Probe.",
+        )),
+    }
+}
+
+async fn connect_tcp(entry: &ProbeEntry) -> Result<TcpStream, Failure> {
     let tcp = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&entry.address)).await
     {
         Ok(Ok(s)) => s,
@@ -370,16 +468,7 @@ async fn connect_tls(
         }
     };
     let _ = tcp.set_nodelay(true);
-    match tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(tls::server_name(), tcp)).await {
-        Ok(Ok(s)) => Ok(s),
-        Ok(Err(e)) => Err(classify_io(&e, entry, identity)),
-        Err(_) => Err(Failure::new(
-            FailureKind::TlsError,
-            "The secure handshake with the probe timed out",
-            entry.address.clone(),
-            "Check that the address belongs to a PortGlass Probe.",
-        )),
-    }
+    Ok(tcp)
 }
 
 /// Errors while exchanging hello, i.e. after our certificate was sent. A TLS 1.3 server rejects a
@@ -430,7 +519,7 @@ fn classify_io(e: &std::io::Error, entry: &ProbeEntry, identity: &Identity) -> F
             format!("Probe {} presented the wrong identity", entry.name),
             format!(
                 "The computer at {} is not the probe you pinned (expected {}).",
-                entry.address,
+                entry.route(),
                 entry.fingerprint.short()
             ),
             "Check the address. If the probe was reinstalled, get its new fingerprint from its \

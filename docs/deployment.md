@@ -58,9 +58,12 @@ destinations; no outbound rule is normally needed.
 On the technician's PC nothing listens on the network: the tunnel endpoint and the UI are bound
 to `127.0.0.1`.
 
-**Connectivity requirement (direct mode):** the technician's PC must reach the probe's address
-and port — same LAN, routed internal network, or an existing authorized VPN. If both sides are
-behind NAT with no VPN, v0.1.0 cannot connect them (relay mode is future work).
+**Connectivity:** in direct mode the technician's PC must reach the probe's address and port:
+same LAN, routed internal network, or an existing authorized VPN. If both sides are behind NAT
+with no VPN, use a [PortGlass Relay](relay.md). The probe then also makes one long-lived
+**outbound** TCP connection to the relay (default port 47200), plus one outbound connection per
+forwarded browser connection. Its `listen` port doesn't need to be reachable from anywhere, so
+you can leave the Windows Firewall rule out or scope it to the LAN.
 
 ## EDR and allowlisting
 

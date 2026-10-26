@@ -164,6 +164,10 @@ footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
 .grid2 .full { grid-column: 1 / -1; }
 .grid2 label span { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+.relay { margin-top: 10px; font-size: 13px; }
+.relay summary { cursor: pointer; color: var(--muted); }
+.relay[open] summary { color: var(--text); }
+.relay .grid2 { margin-top: 6px; }
 .err { color: var(--red); font-size: 13px; margin-top: 8px; }
 .probe .rm { justify-self: end; grid-column: 2; font-size: 12px; }
 [hidden] { display: none !important; }
@@ -217,6 +221,13 @@ footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
           <label><span>Address</span><input class="inp mono" id="pAddr" placeholder="10.0.5.20:47100" autocomplete="off" spellcheck="false"></label>
           <label class="full"><span>Probe fingerprint</span><input class="inp mono" id="pFp" placeholder="sha256:6F59:29C4:..." autocomplete="off" spellcheck="false"></label>
         </div>
+        <details class="relay" id="pRelayBox"><summary>Not on the same network? Connect through a relay</summary>
+          <div class="grid2">
+            <label class="full"><span>Relay address</span><input class="inp mono" id="pRelay" placeholder="relay.example.com:47200" autocomplete="off" spellcheck="false"></label>
+            <label class="full"><span>Relay fingerprint</span><input class="inp mono" id="pRelayFp" placeholder="sha256:..." autocomplete="off" spellcheck="false"></label>
+          </div>
+          <span class="muted">The probe prints both when it is set up to use a relay. With a relay, the address above can stay empty.</span>
+        </details>
         <div class="err" id="pErr" hidden></div>
         <button class="btn primary block" id="pAdd">Add probe</button></li>
     </ol>
@@ -448,10 +459,10 @@ $("addProbe").addEventListener("click", () => { adding = true; render(snap); $("
 $("setupCancel").addEventListener("click", () => { adding = false; $("pErr").hidden = true; render(snap); });
 $("copyFp2").addEventListener("click", async () => { try { await navigator.clipboard.writeText(snap.fingerprint); toast("Your fingerprint is copied. Paste it into the probe."); } catch { toast("Copy failed. Select the text instead."); } });
 $("pAdd").addEventListener("click", async () => {
-  const body = { name: $("pName").value, address: $("pAddr").value, fingerprint: $("pFp").value };
+  const body = { name: $("pName").value, address: $("pAddr").value, fingerprint: $("pFp").value, relay_address: $("pRelay").value, relay_fingerprint: $("pRelayFp").value };
   const r = await fetch("/api/probes/add", { method: "POST", headers: { "content-type": "application/json", "x-portglass-token": token }, body: JSON.stringify(body) });
   if (r.ok) {
-    ["pName", "pAddr", "pFp"].forEach((id) => ($(id).value = ""));
+    ["pName", "pAddr", "pFp", "pRelay", "pRelayFp"].forEach((id) => ($(id).value = "")); $("pRelayBox").open = false;
     $("pErr").hidden = true; adding = false; selected = body.name.trim(); store.set("probe", selected);
     toast(`Added ${selected}. Checking it now.`);
   } else {
