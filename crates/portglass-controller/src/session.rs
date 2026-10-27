@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use portglass_core::audit::AuditLog;
 use portglass_core::bridge::{bridge, Counters};
 use portglass_core::identity::Identity;
+use portglass_core::update;
+use portglass_proto::pairing::PairingCode;
 use portglass_proto::{ControlEvent, ErrorCode, PolicySummary, TargetSpec};
 use serde::Serialize;
 use serde_json::json;
@@ -123,6 +125,31 @@ pub struct SessionView {
     pub diagnostics: Vec<Diagnostic>,
     pub browser: Option<BrowserInfo>,
     pub browser_running: bool,
+    /// Other ports of the same device forwarded in this session (each its own probe session),
+    /// so a console that moves between http and https keeps working.
+    pub also_forwarded: Vec<ForwardedPort>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateView {
+    pub version: String,
+    pub state: UpdateState,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateState {
+    Available,
+    Installing,
+    Installed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwardedPort {
+    pub port: u16,
+    pub local_addr: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +177,8 @@ pub struct Snapshot {
     pub version: String,
     pub browser_available: bool,
     pub default_ttl_mins: u32,
+    /// A newer signed release, when one was found at startup.
+    pub update: Option<UpdateView>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -203,6 +232,9 @@ pub struct Controller {
     options: Options,
     /// Pinned probes. Editable from the window; saved back to `config.source`.
     probes: Mutex<Vec<ProbeEntry>>,
+    /// Set while an update installs (and until the restart), so no session can start.
+    updating: std::sync::atomic::AtomicBool,
+    restart: tokio::sync::Notify,
 }
 
 fn probe_view(p: &ProbeEntry) -> ProbeView {
@@ -288,6 +320,7 @@ impl Controller {
             version: env!("CARGO_PKG_VERSION").into(),
             browser_available: browser::find_chrome(&config.browser).is_some(),
             default_ttl_mins: config.default_ttl_mins,
+            update: None,
         };
         derive_status(&mut snap);
         let (state, _) = watch::channel(snap);
@@ -299,6 +332,8 @@ impl Controller {
             state,
             active: tokio::sync::Mutex::new(None),
             options,
+            updating: std::sync::atomic::AtomicBool::new(false),
+            restart: tokio::sync::Notify::new(),
         })
     }
 
@@ -406,6 +441,25 @@ impl Controller {
         Ok(())
     }
 
+    /// Pin a probe from the pairing code it printed. Every field is validated as if typed.
+    pub fn add_probe_code(self: &Arc<Self>, code: &str) -> Result<String, Failure> {
+        let code = PairingCode::parse(code).map_err(|why| {
+            Failure::new(
+                FailureKind::InvalidTarget,
+                "That pairing code can't be used",
+                format!("It isn't a complete pairing code: {why}."),
+                "Copy the whole line that starts with portglass:probe? from the probe's window.",
+            )
+        })?;
+        self.add_probe(
+            &code.name,
+            &code.address,
+            &code.fingerprint,
+            code.relay.as_ref().map(|(a, f)| (a.as_str(), f.as_str())),
+        )?;
+        Ok(code.name)
+    }
+
     pub fn remove_probe(&self, name: &str) -> Result<(), Failure> {
         {
             let mut probes = self.probes.lock().unwrap();
@@ -472,6 +526,14 @@ impl Controller {
     /// Start a session. Returns an error if one is already active or the request is invalid.
     pub async fn connect(self: &Arc<Self>, req: ConnectRequest) -> Result<(), Failure> {
         let mut active = self.active.lock().await;
+        if self.updating.load(Ordering::SeqCst) {
+            return Err(Failure::new(
+                FailureKind::Busy,
+                "PortGlass is updating",
+                "It restarts when the update is installed.",
+                "Connect after the restart.",
+            ));
+        }
         if let Some(a) = active.as_ref() {
             if !a.task.is_finished() {
                 return Err(Failure::new(
@@ -534,6 +596,7 @@ impl Controller {
                 diagnostics: Vec::new(),
                 browser: None,
                 browser_running: false,
+                also_forwarded: Vec::new(),
             });
         });
         let task = tokio::spawn(async move {
@@ -584,6 +647,113 @@ impl Controller {
     }
 
     /// Authenticate to every configured probe and report what it allows.
+    /// Look for a newer signed release (once, at startup). Says so in the window; installs nothing.
+    pub async fn check_for_update(self: &Arc<Self>) {
+        let found = tokio::task::spawn_blocking(|| {
+            update::remove_previous();
+            if update::check_disabled() {
+                return None;
+            }
+            update::check("portglass", env!("CARGO_PKG_VERSION"))
+                .map_err(|e| tracing::debug!("update check failed: {e:#}"))
+                .ok()
+                .flatten()
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(a) = found {
+            let version = a.version.clone();
+            self.update(|s| {
+                s.update = Some(UpdateView {
+                    version,
+                    state: UpdateState::Available,
+                    message: None,
+                })
+            });
+        }
+    }
+
+    /// Install the newest signed release, then ask the program to restart into it. Refused while
+    /// a session is open, and no session can start while it runs, so an update never cuts a
+    /// technician off mid-task.
+    pub async fn install_update(self: &Arc<Self>) -> Result<(), Failure> {
+        {
+            // Reserved under the same lock connect() takes, so neither can slip past the other.
+            // The phase check also covers a session that disconnect() has taken out of `active`
+            // but is still tearing down (closing its browser, deleting its profile).
+            let active = self.active.lock().await;
+            let settled = matches!(
+                self.state.borrow().phase,
+                Phase::Disconnected | Phase::Failed
+            );
+            if !settled || active.as_ref().is_some_and(|a| !a.task.is_finished()) {
+                return Err(Failure::new(
+                    FailureKind::Busy,
+                    "A session is open",
+                    "PortGlass restarts to finish an update.",
+                    "End the session first, then update.",
+                ));
+            }
+            if self.updating.swap(true, Ordering::SeqCst) {
+                return Err(Failure::new(
+                    FailureKind::Busy,
+                    "The update is already being installed",
+                    "One install at a time.",
+                    "Wait for it to finish.",
+                ));
+            }
+        }
+        // The rest belongs to the controller, not to the request that asked for it: a closed
+        // window or dropped request must not leave a half-finished install holding the
+        // reservation. Progress and errors show in the window's state.
+        let me = self.clone();
+        tokio::spawn(async move { me.run_install().await });
+        Ok(())
+    }
+
+    async fn run_install(self: Arc<Self>) {
+        let set = |state, message: Option<String>| {
+            self.update(|s| {
+                if let Some(u) = &mut s.update {
+                    u.state = state;
+                    u.message = message;
+                }
+            })
+        };
+        set(UpdateState::Installing, None);
+        // Asked again now rather than trusting what startup found: another copy of PortGlass may
+        // have installed something newer since, and this must never step backwards.
+        let result = tokio::task::spawn_blocking(|| {
+            match update::check("portglass", env!("CARGO_PKG_VERSION"))? {
+                Some(available) => update::apply(&available).map(Some),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .and_then(|r| r);
+        match result {
+            Ok(Some(_)) => {
+                set(UpdateState::Installed, None);
+                self.restart.notify_one();
+            }
+            Ok(None) => {
+                self.updating.store(false, Ordering::SeqCst);
+                self.update(|s| s.update = None);
+            }
+            Err(e) => {
+                self.updating.store(false, Ordering::SeqCst);
+                set(UpdateState::Failed, Some(format!("{e:#}")));
+            }
+        }
+    }
+
+    /// Resolves once an update has been installed and the program should restart into it.
+    pub async fn restart_requested(&self) {
+        self.restart.notified().await
+    }
+
     pub async fn check_probes(self: &Arc<Self>) {
         let mut tasks = Vec::new();
         let entries = self.probes.lock().unwrap().clone();
@@ -694,6 +864,9 @@ impl Controller {
                 link.hello.authorized_as
             ),
         );
+        // Subscribed before the first request, so an end of any of this session's grants
+        // announced while the rest is still being set up is not missed.
+        let mut events = link.subscribe();
         let grant = tokio::select! {
             r = link.open_session(&target, ttl_secs) => r,
             _ = cancel.cancelled() => return self.finish_cancelled(Some(&link)).await,
@@ -731,19 +904,94 @@ impl Controller {
         let local = listener
             .local_addr()
             .expect("bound listener has an address");
+
+        // The device's other web port (80 <-> 443, or wherever it redirects), as sessions of
+        // their own, so signing in over https works. Each is approved by the probe's policy like
+        // any session; one the probe refuses is simply left out.
+        let mut extras: Vec<(u16, SessionGrant, TcpListener)> = Vec::new();
+        // Extra ports go to the address the probe pinned for this session, never a fresh lookup
+        // of the name, so they can't land on a different machine.
+        let pinned_ip = grant
+            .resolved_addr
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|a| a.ip());
+        if let (true, Some(pinned_ip)) = (
+            browser::maps_address(&self.config.browser, &target.host),
+            pinned_ip,
+        ) {
+            for port in extra_ports(&target, &report, &link.hello.policy) {
+                let spec = TargetSpec {
+                    host: pinned_ip.to_string(),
+                    port,
+                };
+                let opened = tokio::select! {
+                    r = link.open_session(&spec, ttl_secs) => r,
+                    _ = cancel.cancelled() => {
+                        for (_, g, _) in &extras {
+                            link.close_session(&g.session_id).await;
+                        }
+                        return self.finish_cancelled_session(&link, &grant).await;
+                    }
+                };
+                let g = match opened {
+                    Ok(g) => g,
+                    Err(f) => {
+                        tracing::info!("not forwarding {spec}: {}", f.detail);
+                        continue;
+                    }
+                };
+                let same_machine = g
+                    .resolved_addr
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|a| a.ip() == pinned_ip);
+                if !same_machine {
+                    link.close_session(&g.session_id).await;
+                    continue;
+                }
+                match TcpListener::bind(("127.0.0.1", 0)).await {
+                    Ok(l) => extras.push((port, g, l)),
+                    Err(_) => link.close_session(&g.session_id).await,
+                }
+            }
+        }
+        let also_forwarded: Vec<ForwardedPort> = extras
+            .iter()
+            .map(|(port, _, l)| ForwardedPort {
+                port: *port,
+                local_addr: l.local_addr().map(|a| a.to_string()).unwrap_or_default(),
+            })
+            .collect();
+        let extra_maps: Vec<(u16, u16)> = extras
+            .iter()
+            .filter_map(|(port, _, l)| Some((*port, l.local_addr().ok()?.port())))
+            .collect();
+        let extra_grants: Vec<SessionGrant> = extras.iter().map(|(_, g, _)| g.clone()).collect();
+
         let stats = Arc::new(Stats::default());
         if !self.options.launch_browser {
             *stats.gate.lock().unwrap() = Gate::AnyLocal;
         }
         let tunnel = cancel.child_token();
+        let idle = Duration::from_secs(self.config.idle_timeout_secs as u64);
         tokio::spawn(accept_loop(
             listener,
             link.clone(),
             grant.clone(),
             stats.clone(),
             tunnel.clone(),
-            Duration::from_secs(self.config.idle_timeout_secs as u64),
+            idle,
         ));
+        for (_, g, l) in extras {
+            tokio::spawn(accept_loop(
+                l,
+                link.clone(),
+                g,
+                stats.clone(),
+                tunnel.clone(),
+                idle,
+            ));
+        }
 
         let (url, rules) = browser::plan_navigation(
             &self.config.browser,
@@ -751,8 +999,21 @@ impl Controller {
             &target.host,
             target.port,
             local.port(),
+            &extra_maps,
         );
         let mut diagnostics = report.items.clone();
+        for d in &mut diagnostics {
+            let covered = d.suggestion.as_ref().is_some_and(|s| {
+                s.host == target.host && also_forwarded.iter().any(|f| f.port == s.port)
+            });
+            if covered {
+                let port = d.suggestion.take().map(|s| s.port).unwrap_or_default();
+                d.level = Level::Ok;
+                d.title = format!("The device redirects to port {port}");
+                d.text =
+                    format!("This session forwards port {port} too, so the browser can follow it.");
+            }
+        }
         if !self.options.launch_browser {
             diagnostics.push(Diagnostic {
                 level: Level::Warn,
@@ -791,6 +1052,29 @@ impl Controller {
                 suggestion: None,
             });
         }
+        // Before opening Chrome or announcing READY: did the probe already end any of these
+        // grants while they were being set up?
+        let mut ended_early = None;
+        while let Ok(ev) = events.try_recv() {
+            if let ControlEvent::SessionEnded { session_id, reason } = ev {
+                if session_id == grant.session_id
+                    || extra_grants.iter().any(|g| g.session_id == session_id)
+                {
+                    ended_early = Some(reason);
+                }
+            }
+        }
+        if let Some(reason) = ended_early {
+            tunnel.cancel();
+            link.close_session(&grant.session_id).await;
+            for g in &extra_grants {
+                link.close_session(&g.session_id).await;
+            }
+            let failure = Failure::from_end(reason).unwrap_or_else(|| {
+                Failure::internal("the probe ended the session while it was being set up")
+            });
+            return self.fail(failure, Some(&link)).await;
+        }
         let mut browser_handle = None;
         if self.options.launch_browser {
             match self.launch_browser(&url, rules.as_deref()).await {
@@ -813,6 +1097,7 @@ impl Controller {
             v.diagnostics = diagnostics;
             v.browser = browser_handle.as_ref().map(|b| b.info.clone());
             v.browser_running = browser_handle.is_some();
+            v.also_forwarded = also_forwarded.clone();
         });
 
         // READY ---------------------------------------------------------------------------
@@ -825,6 +1110,10 @@ impl Controller {
                 ("target", json!(target.to_string())),
                 ("resolved", json!(grant.resolved_addr)),
                 ("local", json!(local.to_string())),
+                (
+                    "also_forwarded",
+                    json!(also_forwarded.iter().map(|f| f.port).collect::<Vec<_>>()),
+                ),
                 (
                     "browser_profile",
                     json!(browser_handle.as_ref().map(|b| b.info.profile_dir.clone())),
@@ -840,6 +1129,8 @@ impl Controller {
             .monitor(
                 &link,
                 &grant,
+                &extra_grants,
+                events,
                 &stats,
                 &cancel,
                 &mut cmds,
@@ -858,6 +1149,9 @@ impl Controller {
         self.transition(Phase::Closing, closing_text);
         tunnel.cancel();
         link.close_session(&grant.session_id).await;
+        for g in &extra_grants {
+            link.close_session(&g.session_id).await;
+        }
         if let Some(b) = browser_handle.take() {
             b.close().await;
         }
@@ -966,6 +1260,8 @@ impl Controller {
         &self,
         link: &Arc<ProbeLink>,
         grant: &SessionGrant,
+        extra_grants: &[SessionGrant],
+        mut events: tokio::sync::broadcast::Receiver<ControlEvent>,
         stats: &Arc<Stats>,
         cancel: &CancellationToken,
         cmds: &mut mpsc::Receiver<Cmd>,
@@ -974,7 +1270,6 @@ impl Controller {
         url: &str,
         rules: Option<&str>,
     ) -> End {
-        let mut events = link.subscribe();
         let closed = link.closed();
         let (ping_tx, mut ping_rx) = mpsc::channel::<Option<u32>>(4);
         {
@@ -1025,7 +1320,11 @@ impl Controller {
                     ));
                 }
                 ev = events.recv() => match ev {
-                    Ok(ControlEvent::SessionEnded { session_id, reason }) if session_id == grant.session_id => {
+                    // Any of this session's ports ending ends the whole session: they share one
+                    // lifetime, and a half-working console is worse than a clear end.
+                    Ok(ControlEvent::SessionEnded { session_id, reason })
+                        if session_id == grant.session_id
+                            || extra_grants.iter().any(|g| g.session_id == session_id) => {
                         return match Failure::from_end(reason) {
                             Some(f) => End::Failed(f),
                             None => End::Closed("closed by technician"),
@@ -1039,7 +1338,13 @@ impl Controller {
                         });
                     }
                     Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    // A missed event could have been the end of one of our grants: don't guess.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return End::Failed(Failure::new(
+                        FailureKind::NetworkInterrupted,
+                        "Lost track of the probe's messages",
+                        "Too many arrived at once to be sure the session is intact.",
+                        "Connect again.",
+                    )),
                     Err(_) => return End::Failed(Failure::new(
                         FailureKind::NetworkInterrupted,
                         "The connection to the probe was lost",
@@ -1257,7 +1562,7 @@ pub fn parse_target_input(
             FailureKind::InvalidTarget,
             "That target isn't valid",
             why.to_string(),
-            "Enter an IP address or host name and a port, like 192.168.1.50:80.",
+            "Enter the device's address, like 192.168.1.50 (add :port for anything other than 80).",
         )
     };
     let mut s = input.trim();
@@ -1311,6 +1616,82 @@ pub fn parse_target_input(
 }
 
 /// The indicator and headline come from state, never from separate flags that could disagree.
+/// Ports of the same device worth forwarding alongside the one asked for: the usual http/https
+/// partner, and wherever the device redirected. Ports the probe's published policy plainly
+/// doesn't allow are left out so they aren't requested (the probe enforces it regardless).
+fn extra_ports(target: &TargetSpec, report: &diag::Report, policy: &PolicySummary) -> Vec<u16> {
+    let partner: &[u16] = match target.port {
+        80 => &[443],
+        443 => &[80],
+        8080 => &[8443],
+        8443 => &[8080],
+        _ => &[],
+    };
+    let redirects = report
+        .items
+        .iter()
+        .filter_map(|d| d.suggestion.as_ref())
+        .filter(|s| s.host == target.host)
+        .map(|s| s.port);
+    let mut ports: Vec<u16> = Vec::new();
+    for p in partner.iter().copied().chain(redirects) {
+        if p != target.port && !ports.contains(&p) && policy_may_allow(policy, &target.host, p) {
+            ports.push(p);
+        }
+    }
+    ports.truncate(2);
+    ports
+}
+
+/// Whether the probe's policy summary could allow `host:port`. Anything it can't tell
+/// (a host name, a format it doesn't know) counts as maybe: the probe decides.
+pub fn policy_may_allow(policy: &PolicySummary, host: &str, port: u16) -> bool {
+    let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() else {
+        return true;
+    };
+    policy.allow.iter().any(|rule| {
+        let in_net = match rule.network.split_once('/') {
+            Some((addr, len)) => match (addr.parse::<std::net::IpAddr>(), len.parse::<u32>()) {
+                (Ok(net), Ok(len)) => in_network(ip, net, len),
+                _ => true,
+            },
+            None => rule
+                .network
+                .parse::<std::net::IpAddr>()
+                .map_or(true, |a| a == ip),
+        };
+        in_net
+            && rule.ports.split(',').any(|part| {
+                let part = part.trim();
+                match part.split_once('-') {
+                    Some((lo, hi)) => match (lo.trim().parse::<u16>(), hi.trim().parse::<u16>()) {
+                        (Ok(lo), Ok(hi)) => (lo..=hi).contains(&port),
+                        _ => true,
+                    },
+                    None => part.parse::<u16>().map_or(true, |p| p == port),
+                }
+            })
+    })
+}
+
+fn in_network(ip: std::net::IpAddr, net: std::net::IpAddr, len: u32) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    let (a, b, bits) = match (ip, net) {
+        (V4(a), V4(b)) => (u32::from(a) as u128, u32::from(b) as u128, 32),
+        (V6(a), V6(b)) => (u128::from(a), u128::from(b), 128),
+        (V6(a), V4(b)) => match a.to_ipv4_mapped() {
+            Some(a) => (u32::from(a) as u128, u32::from(b) as u128, 32),
+            None => return false,
+        },
+        _ => return false,
+    };
+    if len > bits {
+        return false;
+    }
+    let shift = bits - len;
+    shift == bits || (a >> shift) == (b >> shift)
+}
+
 fn derive_status(s: &mut Snapshot) {
     let target = s
         .session
@@ -1334,7 +1715,7 @@ fn derive_status(s: &mut Snapshot) {
             if s.probes.is_empty() {
                 "Add a probe to get started.".into()
             } else {
-                "Choose a probe, enter the device's address, and connect.".into()
+                "Choose a probe, then open one of its devices.".into()
             },
         ),
         Phase::Authenticating => (
@@ -1415,6 +1796,83 @@ mod tests {
         assert!(!allowed(Authenticating, Ready));
         assert!(!allowed(Ready, Authenticating));
         assert!(!allowed(Disconnected, Failed));
+    }
+
+    fn policy(rules: &[(&str, &str)]) -> PolicySummary {
+        PolicySummary {
+            allow: rules
+                .iter()
+                .map(|(n, p)| portglass_proto::AllowRuleSummary {
+                    network: n.to_string(),
+                    ports: p.to_string(),
+                    label: None,
+                })
+                .collect(),
+            ..PolicySummary::default()
+        }
+    }
+
+    #[test]
+    fn policy_summary_is_read_conservatively() {
+        let p = policy(&[("192.168.1.50/32", "80, 443"), ("10.0.0.0/8", "8000-8100")]);
+        assert!(policy_may_allow(&p, "192.168.1.50", 443));
+        assert!(!policy_may_allow(&p, "192.168.1.50", 8443));
+        assert!(!policy_may_allow(&p, "192.168.1.51", 80));
+        assert!(policy_may_allow(&p, "10.9.9.9", 8080));
+        assert!(!policy_may_allow(&p, "10.9.9.9", 8443));
+        // What it can't judge, the probe decides.
+        assert!(policy_may_allow(&p, "printer.lan", 1));
+        assert!(policy_may_allow(&policy(&[("::/0", "1")]), "::1", 1));
+        assert!(!policy_may_allow(&policy(&[]), "192.168.1.50", 80));
+        assert!(policy_may_allow(
+            &policy(&[("0.0.0.0/0", "80")]),
+            "1.2.3.4",
+            80
+        ));
+    }
+
+    #[test]
+    fn extra_ports_are_the_web_partner_and_redirects_the_policy_may_allow() {
+        let target = TargetSpec {
+            host: "192.168.1.50".into(),
+            port: 80,
+        };
+        let report = |redirect: Option<u16>| diag::Report {
+            scheme: Scheme::Http,
+            http_status: None,
+            server: None,
+            tls_fingerprint: None,
+            tls_version: None,
+            self_redirect: None,
+            items: redirect
+                .into_iter()
+                .map(|port| Diagnostic {
+                    level: Level::Warn,
+                    title: String::new(),
+                    text: String::new(),
+                    suggestion: Some(diag::Suggestion {
+                        label: String::new(),
+                        host: "192.168.1.50".into(),
+                        port,
+                        scheme: Scheme::Https,
+                    }),
+                })
+                .collect(),
+        };
+        let both = policy(&[("192.168.1.50/32", "80,443,8443")]);
+        assert_eq!(extra_ports(&target, &report(None), &both), vec![443]);
+        assert_eq!(
+            extra_ports(&target, &report(Some(8443)), &both),
+            vec![443, 8443]
+        );
+        assert_eq!(extra_ports(&target, &report(Some(443)), &both), vec![443]);
+        let only_80 = policy(&[("192.168.1.50/32", "80")]);
+        assert!(extra_ports(&target, &report(Some(443)), &only_80).is_empty());
+        let odd = TargetSpec {
+            host: "192.168.1.50".into(),
+            port: 9100,
+        };
+        assert!(extra_ports(&odd, &report(None), &both).is_empty());
     }
 
     #[test]

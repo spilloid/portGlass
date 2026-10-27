@@ -79,7 +79,7 @@ fn d_streams() -> u32 {
     32
 }
 fn d_sessions() -> u32 {
-    4
+    8
 }
 fn d_idle() -> u32 {
     300
@@ -281,7 +281,7 @@ audit_log = "audit.jsonl"
 [limits]
 max_session_ttl_secs = 14400
 max_streams_per_session = 32
-max_sessions = 4
+max_sessions = 8
 stream_idle_timeout_secs = 300
 connect_timeout_secs = 5
 control_timeout_secs = 30

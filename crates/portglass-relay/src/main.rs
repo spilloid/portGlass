@@ -41,6 +41,12 @@ enum Cmd {
         #[arg(long)]
         fingerprint: String,
     },
+    /// Check for a newer signed release and install it (takes effect at the next start).
+    Update {
+        /// Only report whether one is available.
+        #[arg(long)]
+        check: bool,
+    },
     /// Validate the configuration and print it.
     CheckConfig,
 }
@@ -85,6 +91,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Authorize { name, fingerprint } => authorize(&config_path, &name, &fingerprint),
+        Cmd::Update { check } => {
+            portglass_core::update::run_cli("portglass-relay", env!("CARGO_PKG_VERSION"), check)
+        }
         Cmd::CheckConfig => {
             let cfg = RelayConfig::load(&config_path)?;
             print_config(&cfg);
@@ -177,6 +186,14 @@ async fn run(path: &Path) -> Result<()> {
     println!("Press Ctrl+C to stop.");
     println!();
     print_config(&cfg);
+    // In the background, so an offline server starts just as fast.
+    tokio::task::spawn_blocking(|| {
+        if let Some(notice) =
+            portglass_core::update::startup_notice("portglass-relay", env!("CARGO_PKG_VERSION"))
+        {
+            tracing::info!("{notice}");
+        }
+    });
     println!("Fingerprint:  {}", identity.fingerprint);
     println!(
         "Config file:  {} (changes apply automatically)",

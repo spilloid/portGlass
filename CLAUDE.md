@@ -10,7 +10,11 @@ Read [`docs/architecture.md`](docs/architecture.md) and
 
 ## Product rules that override convenience
 
-- **Expose one explicitly authorized TCP service, not a network.** No SOCKS/HTTP proxy, no
+- **Expose one explicitly authorized device, not a network.** A session may also carry that
+  device's web partner port (80/443, 8080/8443) and ports it redirects to, at most two, each a
+  probe-approved session pinned to the main session's IP (operator decision 2026-10-27, so
+  sign-in over HTTPS works; Sol flagged it against the older one-service rule). Never a second
+  device, never a port the probe's policy refuses. No SOCKS/HTTP proxy, no
   routing, DNS, virtual adapters or packet capture.
 - **The probe's capability stays minimal and obvious.** Its command surface is
   `ControlRequest` (open / check / close / ping). Never add execution, file transfer, scanning,
@@ -100,3 +104,10 @@ Dated claims that no automated check covers yet (STD-003 rule 4):
 - **2026-10-25** — Relay mode is verified on loopback only (`tests/relay.rs`, plus a live run of
   the release binaries including a relay restart). No trial yet across real NAT, the internet,
   or a VPS; the Linux musl build is verified only by CI.
+- **2026-10-27** — The updater (`portglass-core::update`) is verified against a local release
+  server only. No published release has carried `portglass-manifest.json` yet; the first real
+  check is v0.4.0 → v0.4.1. The signing key's private half lives outside the repo
+  (`%USERPROFILE%\.portglass-release\update-signing-key.hex`) and must also be the `release`
+  environment's `UPDATE_SIGNING_KEY` secret, or the manifest job fails the release.
+- **2026-10-27** — Extra web ports (80 <-> 443) are verified with loopback mocks; no real printer
+  that switches to HTTPS to sign in has been tried yet.

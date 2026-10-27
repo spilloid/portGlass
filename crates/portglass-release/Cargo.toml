@@ -1,0 +1,21 @@
+[package]
+name = "portglass-release"
+description = "PortGlass release pipeline tool: update-signing keys and signed release manifests. Not shipped."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+ring.workspace = true
+hex.workspace = true
+portglass-core.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
