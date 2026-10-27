@@ -507,7 +507,7 @@ function renderUpdate(s, active) {
     available: `PortGlass ${u.version} is available. Its signature was checked.`,
     installing: `Installing PortGlass ${u.version}…`,
     installed: `PortGlass ${u.version} is installed. Restarting…`,
-    failed: `The update wasn't installed: ${u.message || "unknown error"}. Nothing was changed.`,
+    failed: `The update wasn't installed: ${u.message || "unknown error"}.`,
   }[u.state];
   $("updText").textContent = active && u.state === "available" ? text + " You can update after this session." : text;
   $("updBtn").hidden = !["available", "failed"].includes(u.state);

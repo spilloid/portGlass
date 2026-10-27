@@ -216,10 +216,6 @@ jobs:
           cargo run --release -q --target x86_64-unknown-linux-gnu -p portglass-release -- manifest --version "${TAG#v}" --dir manifest
           cargo run --release -q --target x86_64-unknown-linux-gnu -p portglass-release -- sign --dir manifest
           cargo run --release -q --target x86_64-unknown-linux-gnu -p portglass-release -- verify --dir manifest
-      - name: Upload the manifest
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" manifest/portglass-manifest.json manifest/portglass-manifest.json.sig --clobber
       - name: Check the published binaries against the signed manifest
         env:
           GH_TOKEN: ${{ github.token }}
@@ -229,3 +225,8 @@ jobs:
           rm -f released/*.zip released/*.tar.gz released/*.sha256
           cp manifest/portglass-manifest.json manifest/portglass-manifest.json.sig released/
           cargo run --release -q --target x86_64-unknown-linux-gnu -p portglass-release -- verify --dir released
+      # Published last, so clients never see an update whose files fail the check above.
+      - name: Upload the manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" manifest/portglass-manifest.json manifest/portglass-manifest.json.sig --clobber

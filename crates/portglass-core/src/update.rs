@@ -208,8 +208,33 @@ pub fn apply(available: &Available) -> Result<PathBuf> {
 }
 
 pub fn apply_to(available: &Available, target: &Path) -> Result<()> {
+    // The version installed last, written beside the program. A copy of PortGlass that started
+    // before that install (or a replayed older manifest) can't step it backwards. Checked again
+    // after the download, the moment before the swap. A missing or unreadable file means no
+    // floor beyond the running version, which check() already enforced.
+    let floor_path = {
+        let mut p = target.as_os_str().to_owned();
+        p.push(".version");
+        PathBuf::from(p)
+    };
+    let below_floor = || {
+        std::fs::read_to_string(&floor_path)
+            .ok()
+            .is_some_and(|floor| !is_newer(&available.version, floor.trim()))
+    };
+    if below_floor() {
+        bail!(
+            "version {} or newer is already installed here; nothing was changed",
+            available.version
+        );
+    }
     let body = get(&agent(), &available.url, available.file.size)?;
-    install(&body, &available.file, target)
+    if below_floor() {
+        bail!("a newer version was installed while this one downloaded; nothing was changed");
+    }
+    install(&body, &available.file, target)?;
+    let _ = std::fs::write(&floor_path, &available.version);
+    Ok(())
 }
 
 /// Check `body` against the manifest entry, then swap it in for `target`, keeping the previous
@@ -234,13 +259,13 @@ pub fn install(body: &[u8], file: &ManifestFile, target: &Path) -> Result<()> {
         use std::io::Write;
         let mut f = std::fs::File::create(&new)?;
         f.write_all(body)?;
-        // On disk before it is put in place, so a power cut can't leave a half-written program.
-        f.sync_all()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             f.set_permissions(std::fs::Permissions::from_mode(0o755))?;
         }
+        // On disk before it is put in place, so a power cut can't leave a half-written program.
+        f.sync_all()?;
         Ok(())
     })();
     if let Err(e) = staged {
@@ -265,6 +290,7 @@ fn swap(new: &Path, old: &Path, target: &Path) -> Result<()> {
         let _ = std::fs::remove_file(new);
         return Err(e).with_context(|| format!("keeping a copy of {}", target.display()));
     }
+    let _ = std::fs::File::open(old).and_then(|f| f.sync_all());
     if let Err(e) = std::fs::rename(new, target) {
         let _ = std::fs::remove_file(new);
         return Err(e).with_context(|| {
@@ -273,6 +299,10 @@ fn swap(new: &Path, old: &Path, target: &Path) -> Result<()> {
                 target.display()
             )
         });
+    }
+    // The rename itself lives in the directory entry; persist that too.
+    if let Some(dir) = target.parent() {
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
     }
     Ok(())
 }
@@ -569,6 +599,13 @@ mod tests {
 
         apply_to(&available, &target).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), good);
+
+        // Once 9.0.0 is installed, a copy still running an older version can't install 9.0.0
+        // (or anything older) over it again.
+        std::fs::write(&target, b"pretend 9.0.0 is running").unwrap();
+        let err = apply_to(&available, &target).unwrap_err();
+        assert!(format!("{err:#}").contains("already installed"), "{err:#}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"pretend 9.0.0 is running");
         std::env::remove_var("PORTGLASS_UPDATE_URL");
     }
 

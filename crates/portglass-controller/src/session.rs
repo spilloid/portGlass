@@ -680,8 +680,14 @@ impl Controller {
     pub async fn install_update(self: &Arc<Self>) -> Result<(), Failure> {
         {
             // Reserved under the same lock connect() takes, so neither can slip past the other.
+            // The phase check also covers a session that disconnect() has taken out of `active`
+            // but is still tearing down (closing its browser, deleting its profile).
             let active = self.active.lock().await;
-            if active.as_ref().is_some_and(|a| !a.task.is_finished()) {
+            let settled = matches!(
+                self.state.borrow().phase,
+                Phase::Disconnected | Phase::Failed
+            );
+            if !settled || active.as_ref().is_some_and(|a| !a.task.is_finished()) {
                 return Err(Failure::new(
                     FailureKind::Busy,
                     "A session is open",
@@ -698,6 +704,15 @@ impl Controller {
                 ));
             }
         }
+        // The rest belongs to the controller, not to the request that asked for it: a closed
+        // window or dropped request must not leave a half-finished install holding the
+        // reservation. Progress and errors show in the window's state.
+        let me = self.clone();
+        tokio::spawn(async move { me.run_install().await });
+        Ok(())
+    }
+
+    async fn run_install(self: Arc<Self>) {
         let set = |state, message: Option<String>| {
             self.update(|s| {
                 if let Some(u) = &mut s.update {
@@ -722,23 +737,14 @@ impl Controller {
             Ok(Some(_)) => {
                 set(UpdateState::Installed, None);
                 self.restart.notify_one();
-                Ok(())
             }
             Ok(None) => {
                 self.updating.store(false, Ordering::SeqCst);
                 self.update(|s| s.update = None);
-                Ok(())
             }
             Err(e) => {
                 self.updating.store(false, Ordering::SeqCst);
-                let text = format!("{e:#}");
-                set(UpdateState::Failed, Some(text.clone()));
-                Err(Failure::new(
-                    FailureKind::Internal,
-                    "The update wasn't installed",
-                    text,
-                    "Try again later, or download the release by hand.",
-                ))
+                set(UpdateState::Failed, Some(format!("{e:#}")));
             }
         }
     }
@@ -858,6 +864,9 @@ impl Controller {
                 link.hello.authorized_as
             ),
         );
+        // Subscribed before the first request, so an end of any of this session's grants
+        // announced while the rest is still being set up is not missed.
+        let mut events = link.subscribe();
         let grant = tokio::select! {
             r = link.open_session(&target, ttl_secs) => r,
             _ = cancel.cancelled() => return self.finish_cancelled(Some(&link)).await,
@@ -867,9 +876,6 @@ impl Controller {
             Err(f) => return self.fail(f, Some(&link)).await,
         };
         let granted_at = Instant::now();
-        // Subscribed now, so an end of any of this session's grants announced while the rest
-        // is still being set up is not missed.
-        let events = link.subscribe();
         self.set_session(|v| {
             v.id = grant.session_id.clone();
             v.resolved = Some(grant.resolved_addr.clone());
@@ -1045,6 +1051,29 @@ impl Controller {
                 ),
                 suggestion: None,
             });
+        }
+        // Before opening Chrome or announcing READY: did the probe already end any of these
+        // grants while they were being set up?
+        let mut ended_early = None;
+        while let Ok(ev) = events.try_recv() {
+            if let ControlEvent::SessionEnded { session_id, reason } = ev {
+                if session_id == grant.session_id
+                    || extra_grants.iter().any(|g| g.session_id == session_id)
+                {
+                    ended_early = Some(reason);
+                }
+            }
+        }
+        if let Some(reason) = ended_early {
+            tunnel.cancel();
+            link.close_session(&grant.session_id).await;
+            for g in &extra_grants {
+                link.close_session(&g.session_id).await;
+            }
+            let failure = Failure::from_end(reason).unwrap_or_else(|| {
+                Failure::internal("the probe ended the session while it was being set up")
+            });
+            return self.fail(failure, Some(&link)).await;
         }
         let mut browser_handle = None;
         if self.options.launch_browser {
