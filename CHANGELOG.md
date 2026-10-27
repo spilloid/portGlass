@@ -3,7 +3,7 @@
 All notable changes to PortGlass. Versions follow [semver](https://semver.org/); the version in
 `Cargo.toml` (`[workspace.package]`) is authoritative.
 
-## 0.4.0 — unreleased
+## 0.4.0 — 2026-10-27
 
 ### Added
 - **http and https in one session.** Printer consoles that switch to HTTPS to sign in now work.
