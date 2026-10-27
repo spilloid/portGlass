@@ -3,7 +3,7 @@
 **Operate one web interface on a remote LAN as if it were on your desk — without a VPN, remote
 desktop, or routing a whole network.**
 
-PortGlass v0.3.0 · Windows, and macOS (Apple silicon) for the technician · relay for Linux · MIT · [Docs site](https://spilloid.github.io/portGlass/)
+PortGlass v0.4.0 · Windows, and macOS (Apple silicon) for the technician · relay for Linux · MIT · [Docs site](https://spilloid.github.io/portGlass/)
 
 A technician picks a probe, types `192.168.1.50:80`, and a dedicated, isolated browser window
 opens on the printer's real web interface. Closing the session closes the tunnel and deletes
@@ -63,8 +63,8 @@ Setup takes about ten minutes: [docs/relay.md](docs/relay.md).
 **[Download PortGlass for Windows](https://github.com/spilloid/portGlass/releases/latest)** — one zip with the technician program, the probe, and the optional relay. No installer, no admin rights, no scripts. The Linux relay for a VPS is a separate download on the same page.
 
 1. **On your PC**, unzip and double-click **`portglass.exe`**. The PortGlass window opens and shows *Add a probe* with your fingerprint.
-2. **On a computer at the remote site**, double-click **`portglass-probe.exe`**. It sets itself up and asks a few questions in its window: paste your fingerprint (who may connect), type the device to allow, like `192.168.1.50:80`, and, if you are on another network, the relay to use (Enter skips it). It then prints its own name, address and fingerprint. Allow it through Windows Firewall when asked — ideally only for your network.
-3. **Back in the PortGlass window**, enter what the probe printed and press **Add probe**. Pick it, type `192.168.1.50:80`, and press **Connect**. The light goes red → amber → green and the device's own page opens in a separate window. **End session** (or closing that window) closes the tunnel and deletes the browser's data.
+2. **On a computer at the remote site**, double-click **`portglass-probe.exe`**. It sets itself up and asks a few questions in its window: paste your fingerprint (who may connect), type the device to allow, like `192.168.1.50` (that allows its http and https ports), and, if you are on another network, the relay to use (Enter skips it). It then prints a one-line **pairing code**. Allow it through Windows Firewall when asked — ideally only for your network.
+3. **Back in the PortGlass window**, paste the pairing code and press **Add probe**. The devices the probe allows appear as buttons: press one. (Or type an address and press **Connect**.) The light goes red → amber → green and the device's own page opens in a separate window. **End session** (or closing that window) closes the tunnel and deletes the browser's data.
 
 Everything can also be done from a terminal:
 
@@ -80,7 +80,7 @@ portglass connect --probe front-office --target 192.168.1.50:80
 
 ### On a Mac
 
-Download `portglass-v0.3.0-macos-arm64.tar.gz` from the release, double-click it to unpack, and open the `portglass` program inside. The Mac build isn't notarized by Apple yet, so the first time macOS refuses to open it: **right-click → Open → Open**, or run `xattr -d com.apple.quarantine portglass` in Terminal. The window and the session browser work as on Windows (Chrome required); it connects to the same Windows probes.
+Download `portglass-v0.4.0-macos-arm64.tar.gz` from the release, double-click it to unpack, and open the `portglass` program inside. The Mac build isn't notarized by Apple yet, so the first time macOS refuses to open it: **right-click → Open → Open**, or run `xattr -d com.apple.quarantine portglass` in Terminal. The window and the session browser work as on Windows (Chrome required); it connects to the same Windows probes.
 
 For an administrator-managed install of the probe (Program Files, locked-down ProgramData,
 Start menu shortcut, scoped firewall rule) see [deployment](docs/deployment.md).
@@ -102,7 +102,9 @@ The demo creates throwaway identities under `%TEMP%`, starts a mock printer inte
 | **Dedicated browser** | Your installed Chrome, a fresh profile per session in `%LOCALAPPDATA%\PortGlass\browser-sessions`, deleted when the session ends. Never your personal profile, no system proxy, no global settings. |
 | **The device's own address** | The session window shows `http://192.168.1.50/`, mapped onto the tunnel inside that window only, so Host checks, cookies and same-port redirects behave as on the device's LAN. In strict isolation nothing else resolves. |
 | **Genuine status** | Red · amber · green · gray, driven by the session state machine, heartbeats, and the probe test-connecting to the device every 10 seconds. |
-| **Diagnostics before you're surprised** | Detects HTTPS, shows the device certificate's fingerprint, and warns when the device redirects to a port this session doesn't forward — with a one-click switch. |
+| **http and https together** | A session also carries the device's other web port (80 ↔ 443, 8080 ↔ 8443, or wherever it redirects) when the probe allows it, so consoles that switch to HTTPS to sign in just work. Each port is its own probe-approved session. |
+| **Diagnostics before you're surprised** | Detects HTTPS, shows the device certificate's fingerprint, and warns when the device redirects to a port the probe doesn't allow. |
+| **Signed updates** | Each program says when a newer release exists; one click (or `update`) installs it after checking an Ed25519-signed manifest. Never installs on its own. |
 | **Least capability** | The probe's whole command surface is open, check, close, and ping. Anything else is rejected and audited. |
 | **Audit** | Both ends log operator, probe, destination, port, session start/end and outcome as JSON lines. Never payloads or credentials. |
 
@@ -116,6 +118,8 @@ The demo creates throwaway identities under `%TEMP%`, starts a mock printer inte
 | `portglass probe add/list/remove` | Manage pinned probes (`add --relay H:PORT --relay-fingerprint F` for a relayed probe) |
 | `portglass connect --probe P --target H:PORT [--no-browser]` | Session from the terminal |
 | `portglass diag` | Check config, identity, Chrome, and every probe |
+| `portglass probe add --code "portglass:probe?..."` | Pin a probe from its pairing code |
+| `portglass update [--check]` | Install (or just look for) a newer signed release |
 
 | Probe (`portglass-probe`) | |
 |---|---|
@@ -125,7 +129,8 @@ The demo creates throwaway identities under `%TEMP%`, starts a mock printer inte
 | `portglass-probe allow --network NET --ports 80,443` | Allow a destination |
 | `portglass-probe check-config` | Show the effective policy |
 | `portglass-probe diag --target H:PORT` | Check policy and reachability from the probe |
-| `portglass-probe fingerprint` | Print the probe's fingerprint |
+| `portglass-probe fingerprint` / `pairing-code` | Print the probe's fingerprint / its one-line pairing code |
+| `portglass-probe update [--check]` | Install (or just look for) a newer signed release |
 | `portglass-probe use-relay --address H:PORT --fingerprint F` | Register with a relay (restart to apply) |
 
 | Relay (`portglass-relay`, Linux or Windows) | |
@@ -134,16 +139,17 @@ The demo creates throwaway identities under `%TEMP%`, starts a mock printer inte
 | `portglass-relay run` | Run in this console (default; SIGTERM-aware for systemd) |
 | `portglass-relay authorize --name N --fingerprint F` | Let a probe register |
 | `portglass-relay check-config` / `fingerprint` | Show config / print the fingerprint |
+| `portglass-relay update [--check]` | Install (or just look for) a newer signed release; then restart the service |
 
 Examples of every configuration file: [`examples/`](examples/).
 
-## Known limitations (v0.3.0)
+## Known limitations (v0.4.0)
 
 - **The relay sees metadata.** Which probe and controller fingerprints meet, when, from where, and
   how many bytes. It never sees content. Run it on a machine you control.
-- **One target port per session.** A device that serves assets or redirects across ports
-  (80 ↔ 443, a separate WebSocket port) needs a session per port; PortGlass tells you when it
-  sees the redirect.
+- **One device per session.** Its web partner port and redirect targets come along when the probe
+  allows them (up to two extra ports). A device that reaches *other* hosts, or ports the probe
+  doesn't allow, still can't; PortGlass says when it sees the redirect.
 - **HTTPS certificates are the browser's call.** Self-signed device certificates produce Chrome's
   normal warning; PortGlass shows the fingerprint so you can compare. It never disables checks.
 - **Chrome shows a notice about `--host-resolver-rules`.** That is the per-window address mapping;
@@ -151,9 +157,23 @@ Examples of every configuration file: [`examples/`](examples/).
   [security model](docs/security-model.md#browser-address-mapping)).
 - **No Windows service yet.** The probe runs in a visible console by design for v0.1.0.
 - **Signed Windows binaries only.** Windows release builds are Authenticode-signed. The macOS
-  controller is not notarized, and the Linux relay is checked by its published SHA-256.
+  controller is not notarized. Every release also carries an Ed25519-signed manifest that the
+  built-in updater checks (see [Updates](#updates)); releases before v0.4.0 have no updater.
 
 Full list: [docs/security-model.md#known-limitations](docs/security-model.md#known-limitations).
+
+## Updates
+
+At startup each program asks GitHub once whether a newer release exists. It only *tells* you:
+the window shows **Update and restart**, and the probe and relay print a line. Installing is
+always your action (`portglass update`, `portglass-probe update`, `portglass-relay update`).
+Before installing, PortGlass checks that `portglass-manifest.json` is signed by the PortGlass
+release key compiled into it, that the release is newer, and that the download matches the
+manifest's SHA-256 and size. Someone who controls the GitHub release or the network can at most
+withhold an update, not substitute one. The new version takes effect at the next start; the old
+file is kept as `<program>.old` until then. Set `PORTGLASS_NO_UPDATE_CHECK=1` to turn the
+startup check off. An administrator install (Program Files, `/usr/local/bin`) needs an
+administrator to update it.
 
 ## Development
 

@@ -3,6 +3,38 @@
 All notable changes to PortGlass. Versions follow [semver](https://semver.org/); the version in
 `Cargo.toml` (`[workspace.package]`) is authoritative.
 
+## 0.4.0 — unreleased
+
+### Added
+- **http and https in one session.** Printer consoles that switch to HTTPS to sign in now work.
+  When the probe's policy allows it, a session also forwards the device's web partner port
+  (80 ↔ 443, 8080 ↔ 8443) and any port of the same device it redirects to, at most two extra.
+  Each one is its own probe session: approved by the probe's policy, audited, and ended with the
+  session. The session browser maps all of them onto the tunnel. A redirect that is now covered is
+  reported as fine instead of offering a switch. Ports the probe's published policy plainly
+  doesn't allow are never requested.
+- **Pairing code.** The probe prints one line (`portglass:probe?name=…&addr=…&fp=…`, plus the
+  relay route if there is one) at setup and every start (`portglass-probe pairing-code`). Paste
+  it into *Add probe* (or `portglass probe add --code …`) instead of typing name, address and
+  fingerprint. Every field is validated as if typed. Manual entry is still there.
+- **One-click devices.** The window lists the single devices the selected probe allows as
+  buttons. Press one to connect. Typing an address still works, and a bare address means port 80.
+- **Signed updates.** Each release carries `portglass-manifest.json` with every program's raw
+  binary, signed with Ed25519 by the release pipeline. The controller, probe and relay check for a
+  newer release once at startup and *say* so. The window shows **Update and restart**, and the
+  probe and relay print a line. `portglass update`, `portglass-probe update` and
+  `portglass-relay update` install it, and `--check` only reports. Installing requires a manifest
+  signed by the key compiled into the running build, a newer version, and a download that matches
+  its hash and size. The old file is kept as `<program>.old`. `PORTGLASS_NO_UPDATE_CHECK` turns the
+  check off. New crate `portglass-release` (CI only) builds, signs and self-verifies the manifest.
+
+### Changed
+- Probe setup: typing a bare address (`192.168.1.50`) allows its ports 80 and 443. `address:port`
+  still allows exactly that port.
+- Window: the http/https choice and session length moved under *Options* (Auto is the default).
+- Probe default `max_sessions` is 8 (was 4), since a technician's session may hold one per web
+  port. Existing `probe.toml` files keep their value.
+
 ## 0.3.0 — 2026-10-25
 
 ### Added

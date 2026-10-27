@@ -63,18 +63,27 @@ enum Cmd {
     },
     /// Check configuration, browser, and every probe.
     Diag,
+    /// Check for a newer signed release and install it (takes effect at the next start).
+    Update {
+        /// Only report whether one is available.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum ProbeCmd {
     Add {
-        #[arg(long)]
-        name: String,
+        /// The pairing code the probe prints (portglass:probe?...), instead of the fields below.
+        #[arg(long, conflicts_with_all = ["name", "address", "fingerprint", "relay"])]
+        code: Option<String>,
+        #[arg(long, required_unless_present = "code")]
+        name: Option<String>,
         /// host:port, e.g. 10.0.5.20:47100. Not needed with --relay.
         #[arg(long, default_value = "")]
         address: String,
-        #[arg(long)]
-        fingerprint: String,
+        #[arg(long, required_unless_present = "code")]
+        fingerprint: Option<String>,
         /// Reach the probe through a PortGlass Relay, e.g. relay.example.com:47200
         #[arg(long, requires = "relay_fingerprint")]
         relay: Option<String>,
@@ -145,6 +154,9 @@ fn main() -> Result<()> {
             ttl_mins,
         } => rt.block_on(connect(&path, probe, target, scheme, no_browser, ttl_mins)),
         Cmd::Diag => rt.block_on(diag(&path)),
+        Cmd::Update { check } => {
+            portglass_core::update::run_cli("portglass", env!("CARGO_PKG_VERSION"), check)
+        }
     }
 }
 
@@ -178,12 +190,28 @@ fn probe_cmd(path: &Path, action: ProbeCmd) -> Result<()> {
     let mut cfg = ControllerConfig::load(path)?;
     match action {
         ProbeCmd::Add {
+            code,
             name,
             address,
             fingerprint,
             relay,
             relay_fingerprint,
         } => {
+            let (name, address, fingerprint, relay, relay_fingerprint) = match code {
+                Some(code) => {
+                    let c = portglass_proto::pairing::PairingCode::parse(&code)
+                        .map_err(|e| anyhow::anyhow!("that pairing code can't be used: {e}"))?;
+                    let (relay, relay_fp) = c.relay.unzip();
+                    (c.name, c.address, c.fingerprint, relay, relay_fp)
+                }
+                None => (
+                    name.unwrap_or_default(),
+                    address,
+                    fingerprint.unwrap_or_default(),
+                    relay,
+                    relay_fingerprint,
+                ),
+            };
             let fingerprint: Fingerprint = fingerprint.parse()?;
             if cfg.probe(&name).is_some() {
                 bail!("a probe named {name:?} already exists (remove it first)");
@@ -247,11 +275,15 @@ fn load_controller(path: &Path, options: Options) -> Result<Arc<Controller>> {
 
 async fn ui(path: &Path, no_window: bool, standalone: bool) -> Result<()> {
     browser::sweep_stale_profiles();
+    // Taken now: once an update renames this file aside, Windows may report the new name.
+    let own_exe = std::env::current_exe()?;
     let ctrl = load_controller(path, Options::default())?;
     let server = portglass_controller::ui::serve(ctrl.clone()).await?;
     {
         let c = ctrl.clone();
         tokio::spawn(async move { c.check_probes().await });
+        let c = ctrl.clone();
+        tokio::spawn(async move { c.check_for_update().await });
     }
     println!("PortGlass Controller {}", env!("CARGO_PKG_VERSION"));
     let window = if no_window {
@@ -304,14 +336,23 @@ async fn ui(path: &Path, no_window: bool, standalone: bool) -> Result<()> {
             None => std::future::pending::<()>().await,
         }
     };
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = closed => {}
-    }
+    let restart = tokio::select! {
+        _ = tokio::signal::ctrl_c() => false,
+        _ = closed => false,
+        _ = ctrl.restart_requested() => true,
+    };
     println!("Ending sessions...");
     ctrl.disconnect().await;
     if let Some(w) = window {
         w.close().await;
+    }
+    if restart {
+        // The updated file is now in place under this program's name; start it with the same
+        // arguments. It opens its own window.
+        std::process::Command::new(&own_exe)
+            .args(std::env::args_os().skip(1))
+            .spawn()
+            .context("starting the updated PortGlass")?;
     }
     Ok(())
 }

@@ -22,6 +22,7 @@ pub const ALPN_DATA: &[u8] = b"portglass-data/1";
 pub const DEFAULT_PROBE_PORT: u16 = 47100;
 pub const DEFAULT_RELAY_PORT: u16 = 47200;
 
+pub mod pairing;
 pub mod relay;
 
 /// Upper bound on any single frame. Control messages are tiny; anything larger is a protocol

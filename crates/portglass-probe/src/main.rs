@@ -36,6 +36,8 @@ enum Cmd {
     Run,
     /// Print this probe's fingerprint, for technicians to pin.
     Fingerprint,
+    /// Print the one-line pairing code for the technician's Add probe.
+    PairingCode,
     /// Authorize a technician's controller.
     Authorize {
         #[arg(long)]
@@ -60,6 +62,12 @@ enum Cmd {
         /// The relay's fingerprint (portglass-relay fingerprint).
         #[arg(long)]
         fingerprint: String,
+    },
+    /// Check for a newer signed release and install it (takes effect at the next start).
+    Update {
+        /// Only report whether one is available.
+        #[arg(long)]
+        check: bool,
     },
     /// Validate the configuration and print the effective policy.
     CheckConfig,
@@ -117,6 +125,12 @@ fn main() -> Result<()> {
             println!("{}", id.fingerprint);
             Ok(())
         }
+        Cmd::PairingCode => {
+            let cfg = ProbeConfig::load(&config_path)?;
+            let id = Identity::load(&cfg.identity_dir, "probe")?;
+            println!("{}", pairing_code(&cfg, &id));
+            Ok(())
+        }
         Cmd::Authorize { name, fingerprint } => authorize(&config_path, &name, &fingerprint),
         Cmd::Allow {
             network,
@@ -127,6 +141,9 @@ fn main() -> Result<()> {
             address,
             fingerprint,
         } => use_relay(&config_path, &address, &fingerprint),
+        Cmd::Update { check } => {
+            portglass_core::update::run_cli("portglass-probe", env!("CARGO_PKG_VERSION"), check)
+        }
         Cmd::CheckConfig => {
             let cfg = ProbeConfig::load(&config_path)?;
             print_policy(&cfg);
@@ -358,6 +375,8 @@ async fn run(path: &Path) -> Result<()> {
     println!();
     print_policy(&cfg);
     println!("Fingerprint:  {}", identity.fingerprint);
+    println!("Pairing code (paste into Add probe on the technician's PC):");
+    println!("{}", pairing_code(&cfg, &identity));
     println!(
         "Config file:  {} (changes apply automatically)",
         path.display()
@@ -366,6 +385,14 @@ async fn run(path: &Path) -> Result<()> {
 
     let handle = portglass_probe::start(cfg, identity, audit).await?;
     println!("Listening on {}", handle.addr);
+    tokio::task::spawn_blocking(|| {
+        if let Some(notice) =
+            portglass_core::update::startup_notice("portglass-probe", env!("CARGO_PKG_VERSION"))
+        {
+            println!("{notice}");
+            println!("(From another window. It takes effect when this probe next starts.)");
+        }
+    });
 
     let mut last_mtime = modified(path);
     let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -444,22 +471,24 @@ fn first_run_setup(path: &Path) -> Result<()> {
     }
     if cfg.allow.is_empty() {
         println!("2. What may they reach?");
-        println!("   Enter a device's address and port, for example 192.168.1.50:80.");
-        println!("   Only what you list here is reachable. Add more on separate lines.");
+        println!("   Enter a device's address, for example 192.168.1.50. That allows its web");
+        println!("   pages, http and https (ports 80 and 443). For another port, add it:");
+        println!("   192.168.1.50:8080. Only what you list here is reachable. One per line.");
         loop {
             let entry = prompt("   Device (blank to finish): ")?;
             if entry.is_empty() {
                 break;
             }
-            match parse_target(&entry) {
-                Ok(t) => {
+            match parse_device(&entry) {
+                Ok((host, ports)) => {
                     let label = prompt("   Label, e.g. Front office printer (optional): ")?;
                     let label = (!label.is_empty()).then_some(label);
-                    if let Err(e) = allow(path, &t.host, &[t.port.to_string()], label) {
+                    let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+                    if let Err(e) = allow(path, &host, &ports, label) {
                         println!("   Not added: {e:#}");
                     }
                 }
-                Err(e) => println!("   Use address:port, for example 192.168.1.50:80 ({e:#})."),
+                Err(e) => println!("   Use an address like 192.168.1.50 ({e:#})."),
             }
         }
         println!();
@@ -481,19 +510,13 @@ fn first_run_setup(path: &Path) -> Result<()> {
         println!();
     }
     let cfg = ProbeConfig::load(path)?;
-    let port = cfg
-        .listen
-        .rsplit_once(':')
-        .map(|(_, p)| p)
-        .unwrap_or("47100");
-    println!("4. On the technician's PC, in Add probe, enter:");
-    println!("   Name:        {}", cfg.name);
-    println!("   Address:     {}:{port}", local_address_hint());
-    println!("   Fingerprint: {}", id.fingerprint);
-    if let Some(r) = &cfg.relay {
-        println!("   Off-site technicians: open \"Connect through a relay\" and enter");
-        println!("   Relay address:     {}", r.address);
-        println!("   Relay fingerprint: {}", r.fingerprint);
+    println!("4. On the technician's PC, choose Add probe and paste this pairing code:");
+    println!();
+    println!("{}", pairing_code(&cfg, &id));
+    println!();
+    println!("   (It holds this probe's name, address and fingerprint. Send it the way you sent");
+    println!("   the technician's fingerprint. It is printed again each time the probe starts.)");
+    if cfg.relay.is_some() {
         println!("   The relay's administrator must authorize this probe:");
         println!(
             "   portglass-relay authorize --name {} --fingerprint {}",
@@ -502,6 +525,41 @@ fn first_run_setup(path: &Path) -> Result<()> {
     }
     println!();
     Ok(())
+}
+
+/// What a technician pastes into Add probe. With a relay configured the code routes through it,
+/// since that is why the relay was set up.
+fn pairing_code(cfg: &ProbeConfig, id: &Identity) -> String {
+    let port = cfg
+        .listen
+        .rsplit_once(':')
+        .map(|(_, p)| p)
+        .unwrap_or("47100");
+    portglass_proto::pairing::PairingCode {
+        name: cfg.name.clone(),
+        address: format!("{}:{port}", local_address_hint()),
+        fingerprint: id.fingerprint.to_string(),
+        relay: cfg
+            .relay
+            .as_ref()
+            .map(|r| (r.address.clone(), r.fingerprint.to_string())),
+    }
+    .encode()
+}
+
+/// A device as typed in the setup wizard: `192.168.1.50` means its web ports (80 and 443);
+/// `192.168.1.50:8080` means exactly that port.
+fn parse_device(s: &str) -> Result<(String, Vec<u16>)> {
+    let s = s.trim();
+    let bare = s.trim_start_matches('[').trim_end_matches(']');
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return Ok((bare.to_string(), vec![80, 443]));
+    }
+    let t = parse_target(s)?;
+    t.host
+        .parse::<std::net::IpAddr>()
+        .context("expected an IP address")?;
+    Ok((t.host, vec![t.port]))
 }
 
 /// This computer's likely LAN address, for the pairing instructions. Opens no connection:

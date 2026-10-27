@@ -170,6 +170,18 @@ footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
 .relay .grid2 { margin-top: 6px; }
 .err { color: var(--red); font-size: 13px; margin-top: 8px; }
 .probe .rm { justify-self: end; grid-column: 2; font-size: 12px; }
+textarea.code { margin-top: 8px; resize: vertical; min-height: 64px; overflow-wrap: anywhere; }
+.devices { display: grid; gap: 8px; }
+.device { display: grid; grid-template-columns: 1fr auto; gap: 0 10px; align-items: center; text-align: left; padding: 11px 14px; border-radius: 11px; border: 1px solid var(--line); background: var(--panel-2); cursor: pointer; transition: border-color .2s, background .2s; }
+.device:hover { border-color: var(--accent); background: var(--accent-soft); }
+.device .dn { font-weight: 600; overflow-wrap: anywhere; }
+.device .da { grid-column: 1; font: 12.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.device .go { grid-row: 1 / span 2; grid-column: 2; color: var(--accent); font-weight: 600; white-space: nowrap; }
+.opts { margin-top: 10px; }
+.opts .row { margin-top: 8px; }
+.opts > .muted { display: block; margin-top: 6px; }
+.update { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 12px; border-radius: 11px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.update span { flex: 1 1 200px; }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -180,6 +192,11 @@ footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
     <h1>PortGlass</h1>
     <span class="ver" id="ver"></span>
   </header>
+
+  <div class="update" id="upd" hidden>
+    <span id="updText"></span>
+    <button class="btn primary small" id="updBtn">Update and restart</button>
+  </div>
 
   <div class="card hero" id="hero" data-ind="red" role="status" aria-live="polite">
     <div class="hero-row">
@@ -215,18 +232,17 @@ footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
       <li><b>When it asks, paste your fingerprint</b>
         <span class="muted">This tells the probe that this PC is allowed to connect.</span>
         <div class="fpbox"><code id="myFp"></code><button class="btn small" id="copyFp2">Copy</button></div></li>
-      <li><b>Enter what the probe shows</b>
-        <div class="grid2">
-          <label><span>Name</span><input class="inp" id="pName" placeholder="front-office" autocomplete="off" spellcheck="false"></label>
-          <label><span>Address</span><input class="inp mono" id="pAddr" placeholder="10.0.5.20:47100" autocomplete="off" spellcheck="false"></label>
-          <label class="full"><span>Probe fingerprint</span><input class="inp mono" id="pFp" placeholder="sha256:6F59:29C4:..." autocomplete="off" spellcheck="false"></label>
-        </div>
-        <details class="relay" id="pRelayBox"><summary>Not on the same network? Connect through a relay</summary>
+      <li><b>Paste the pairing code the probe shows</b>
+        <span class="muted">One line starting with <code>portglass:probe?</code>. It carries the probe's name, address and fingerprint.</span>
+        <textarea class="inp mono code" id="pCode" rows="3" placeholder="portglass:probe?name=front-office&amp;addr=10.0.5.20:47100&amp;fp=sha256:..." autocomplete="off" spellcheck="false"></textarea>
+        <details class="relay" id="pManual"><summary>Enter the details by hand instead</summary>
           <div class="grid2">
-            <label class="full"><span>Relay address</span><input class="inp mono" id="pRelay" placeholder="relay.example.com:47200" autocomplete="off" spellcheck="false"></label>
+            <label><span>Name</span><input class="inp" id="pName" placeholder="front-office" autocomplete="off" spellcheck="false"></label>
+            <label><span>Address</span><input class="inp mono" id="pAddr" placeholder="10.0.5.20:47100" autocomplete="off" spellcheck="false"></label>
+            <label class="full"><span>Probe fingerprint</span><input class="inp mono" id="pFp" placeholder="sha256:6F59:29C4:..." autocomplete="off" spellcheck="false"></label>
+            <label class="full"><span>Relay address (only through a relay)</span><input class="inp mono" id="pRelay" placeholder="relay.example.com:47200" autocomplete="off" spellcheck="false"></label>
             <label class="full"><span>Relay fingerprint</span><input class="inp mono" id="pRelayFp" placeholder="sha256:..." autocomplete="off" spellcheck="false"></label>
           </div>
-          <span class="muted">The probe prints both when it is set up to use a relay. With a relay, the address above can stay empty.</span>
         </details>
         <div class="err" id="pErr" hidden></div>
         <button class="btn primary block" id="pAdd">Add probe</button></li>
@@ -236,21 +252,28 @@ footer .fp { font-family: var(--mono); overflow-wrap: anywhere; }
   <section class="card" id="formCard">
     <h2>Probe <span class="act"><button class="btn link" id="addProbe">Add probe</button> · <button class="btn link" id="recheck">Check probes</button></span></h2>
     <div class="probes" id="probes"></div>
-    <label class="field">
-      <span>Device address and port</span>
-      <input class="target" id="target" placeholder="192.168.1.50:80" autocomplete="off" spellcheck="false" inputmode="url">
-    </label>
-    <div class="row">
-      <div class="seg" id="scheme" role="group" aria-label="Protocol">
-        <button data-v="auto" class="on">Auto</button><button data-v="http">HTTP</button><button data-v="https">HTTPS</button>
-      </div>
-      <select id="ttl" aria-label="Session length">
-        <option value="15">15 min</option><option value="30">30 min</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option>
-      </select>
+    <div id="devWrap" hidden>
+      <h2 style="margin-top:16px">Open a device</h2>
+      <div class="devices" id="devices"></div>
     </div>
+    <label class="field">
+      <span id="targetLabel">Device address</span>
+      <input class="target" id="target" placeholder="192.168.1.50" autocomplete="off" spellcheck="false" inputmode="url">
+    </label>
+    <details class="opts" id="opts"><summary>Options</summary>
+      <div class="row">
+        <div class="seg" id="scheme" role="group" aria-label="Protocol">
+          <button data-v="auto" class="on">Auto</button><button data-v="http">HTTP</button><button data-v="https">HTTPS</button>
+        </div>
+        <select id="ttl" aria-label="Session length">
+          <option value="15">15 min</option><option value="30">30 min</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option>
+        </select>
+      </div>
+      <span class="muted small">Auto finds out whether the device speaks http or https. Sessions end on their own after this long.</span>
+    </details>
     <button class="btn primary block" id="connect">Connect</button>
     <div class="note"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/></svg>
-      <span>Only this address and port become reachable, in a separate browser with its own temporary profile. Nothing else on that network is exposed.</span></div>
+      <span>Only this device's web ports become reachable, in a separate browser with its own temporary profile. Nothing else on that network is exposed.</span></div>
   </section>
 
   <section class="card" id="sessionCard" hidden>
@@ -339,6 +362,43 @@ function renderProbes(s) {
     if (confirm(`Remove probe ${b.dataset.rm}? You can add it again later.`)) await api("/api/probes/remove", { name: b.dataset.rm });
   }));
   el.querySelectorAll("input").forEach((i) => i.addEventListener("change", () => { selected = i.value; store.set("probe", selected); renderProbes(snap); updateConnectLabel(); }));
+  renderDevices(s);
+}
+// The single devices the selected probe allows, as one-click buttons. Ranges and subnets still
+// need the address typed below. The probe enforces its policy whatever is shown here.
+function portList(spec) {
+  const out = [];
+  for (const part of String(spec).split(",")) {
+    const [lo, hi] = part.trim().split("-").map((x) => parseInt(x, 10));
+    if (Number.isInteger(lo) && hi === undefined) out.push(lo);
+    else if (Number.isInteger(lo) && Number.isInteger(hi) && hi - lo < 4096) for (let p = lo; p <= hi; p++) out.push(p);
+  }
+  return out;
+}
+function devicesOf(p) {
+  if (!p || !p.policy) return [];
+  return p.policy.allow.flatMap((a) => {
+    const m = /^([0-9.]+)(?:\/32)?$/.exec(a.network);
+    if (!m) return [];
+    const ports = portList(a.ports);
+    const port = ports.includes(80) ? 80 : ports.includes(443) ? 443 : ports[0];
+    if (!port) return [];
+    const target = port === 80 ? m[1] : `${m[1]}:${port}`;
+    const web = [80, 443].filter((x) => ports.includes(x));
+    const shown = web.length === 2 ? "http + https" : ports.length > 3 ? a.ports : ports.join(", ");
+    return [{ name: a.label || m[1], target, detail: `${m[1]} · ${shown}` }];
+  });
+}
+function renderDevices(s) {
+  const p = s.probes.find((x) => x.name === selected);
+  const list = devicesOf(p);
+  $("devWrap").hidden = !list.length;
+  $("targetLabel").textContent = list.length ? "Or type a device address" : "Device address";
+  $("devices").innerHTML = list.map((d, i) => `<button class="device" data-dev="${i}">
+    <span class="dn">${esc(d.name)}</span><span class="da">${esc(d.detail)}</span><span class="go">Open →</span></button>`).join("");
+  $("devices").querySelectorAll("[data-dev]").forEach((b) => b.addEventListener("click", () => {
+    $("target").value = list[+b.dataset.dev].target; setScheme("auto"); updateConnectLabel(); doConnect();
+  }));
 }
 function updateConnectLabel() {
   const t = $("target").value.trim();
@@ -381,7 +441,8 @@ function drawSpark(v) {
 function renderSession(s) {
   const v = s.session;
   $("sTarget").textContent = v.target;
-  const rows = [["Probe", v.probe], ["Resolved", v.resolved], ["Opened in browser", v.url], ["Local tunnel", v.local_addr]];
+  const also = (v.also_forwarded || []).map((f) => `port ${f.port}`).join(", ");
+  const rows = [["Probe", v.probe], ["Resolved", v.resolved], ["Also forwarded", also], ["Opened in browser", v.url], ["Local tunnel", v.local_addr]];
   $("sKv").innerHTML = rows.filter((r) => r[1]).map(([k, x]) => `<dt>${esc(k)}</dt><dd>${esc(x)}</dd>`).join("");
   $("rDown").textContent = bytes(v.rate_down) + "/s"; $("rUp").textContent = bytes(v.rate_up) + "/s";
   const device = v.target_reachable === false ? `<span style="color:var(--red)">No answer</span>` : v.target_rtt_ms != null ? v.target_rtt_ms + " ms" : "—";
@@ -434,7 +495,23 @@ function render(s) {
   if (active && s.session) renderSession(s);
   $("timeline").innerHTML = s.timeline.slice().reverse().map((t) => `<li><time>${hhmmss(t.at)}</time><span>${esc(t.text)}</span></li>`).join("");
   $("ver").textContent = "v" + s.version; $("op").textContent = s.operator; $("fp").textContent = s.fingerprint;
+  renderUpdate(s, active);
   updateConnectLabel();
+}
+function renderUpdate(s, active) {
+  const u = s.update;
+  $("upd").hidden = !u;
+  if (!u) return;
+  const text = {
+    available: `PortGlass ${u.version} is available. Its signature was checked.`,
+    installing: `Installing PortGlass ${u.version}…`,
+    installed: `PortGlass ${u.version} is installed. Restarting…`,
+    failed: `The update wasn't installed: ${u.message || "unknown error"}. Nothing was changed.`,
+  }[u.state];
+  $("updText").textContent = active && u.state === "available" ? text + " You can update after this session." : text;
+  $("updBtn").hidden = !["available", "failed"].includes(u.state);
+  $("updBtn").disabled = active;
+  $("updBtn").textContent = u.state === "failed" ? "Try again" : "Update and restart";
 }
 
 function setScheme(v) { scheme = v; store.set("scheme", v); document.querySelectorAll("#scheme button").forEach((b) => b.classList.toggle("on", b.dataset.v === v)); }
@@ -455,15 +532,19 @@ $("end").addEventListener("click", () => api("/api/disconnect"));
 $("showBrowser").addEventListener("click", () => api("/api/browser"));
 $("retry").addEventListener("click", () => { if (lastReq) api("/api/connect", lastReq); else api("/api/dismiss"); });
 $("dismiss").addEventListener("click", () => api("/api/dismiss"));
-$("addProbe").addEventListener("click", () => { adding = true; render(snap); $("pName").focus(); });
+$("addProbe").addEventListener("click", () => { adding = true; render(snap); $("pCode").focus(); });
 $("setupCancel").addEventListener("click", () => { adding = false; $("pErr").hidden = true; render(snap); });
 $("copyFp2").addEventListener("click", async () => { try { await navigator.clipboard.writeText(snap.fingerprint); toast("Your fingerprint is copied. Paste it into the probe."); } catch { toast("Copy failed. Select the text instead."); } });
+$("pCode").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("pAdd").click(); } });
 $("pAdd").addEventListener("click", async () => {
-  const body = { name: $("pName").value, address: $("pAddr").value, fingerprint: $("pFp").value, relay_address: $("pRelay").value, relay_fingerprint: $("pRelayFp").value };
+  const code = $("pCode").value.trim();
+  const body = code && !$("pManual").open ? { code }
+    : { name: $("pName").value, address: $("pAddr").value, fingerprint: $("pFp").value, relay_address: $("pRelay").value, relay_fingerprint: $("pRelayFp").value };
   const r = await fetch("/api/probes/add", { method: "POST", headers: { "content-type": "application/json", "x-portglass-token": token }, body: JSON.stringify(body) });
   if (r.ok) {
-    ["pName", "pAddr", "pFp", "pRelay", "pRelayFp"].forEach((id) => ($(id).value = "")); $("pRelayBox").open = false;
-    $("pErr").hidden = true; adding = false; selected = body.name.trim(); store.set("probe", selected);
+    let name = body.name || ""; try { name = (await r.json()).name || name; } catch {}
+    ["pCode", "pName", "pAddr", "pFp", "pRelay", "pRelayFp"].forEach((id) => ($(id).value = "")); $("pManual").open = false;
+    $("pErr").hidden = true; adding = false; selected = name.trim(); store.set("probe", selected);
     toast(`Added ${selected}. Checking it now.`);
   } else {
     let msg = r.statusText; try { const f = await r.json(); msg = `${f.detail} ${f.hint}`; } catch {}
@@ -471,6 +552,7 @@ $("pAdd").addEventListener("click", async () => {
   }
 });
 $("recheck").addEventListener("click", () => api("/api/probes/check"));
+$("updBtn").addEventListener("click", () => api("/api/update"));
 $("copyFp").addEventListener("click", async () => { try { await navigator.clipboard.writeText(snap.fingerprint); toast("Fingerprint copied"); } catch { toast("Copy failed — select the text below"); } });
 addEventListener("resize", () => { if (snap && snap.session) drawSpark(snap.session); });
 

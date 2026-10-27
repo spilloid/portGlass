@@ -7,10 +7,11 @@ members = [
     "crates/portglass-controller",
     "crates/portglass-mock-target",
     "crates/portglass-relay",
+    "crates/portglass-release",
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 authors = ["Joseph Spillers"]
@@ -45,6 +46,7 @@ hex = "0.4"
 ipnet = "2"
 time = { version = "0.3", features = ["formatting"] }
 axum = { version = "0.8", features = ["ws"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [profile.release]
 lto = "thin"

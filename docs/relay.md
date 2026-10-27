@@ -47,6 +47,21 @@ through the relay, and its distance from you and the site adds latency.
 
    You can also run `portglass-relay --config ... run` in a terminal (Ctrl+C stops it).
 
+## Update the relay
+
+The relay logs a line at startup when a newer signed release exists. To install it:
+
+```sh
+sudo portglass-relay update        # checks the signed manifest, then replaces /usr/local/bin/portglass-relay
+sudo systemctl restart portglass-relay
+```
+
+`update --check` only reports. The update is refused unless the release manifest is signed by the
+PortGlass release key built into the relay you're running, and the download matches it (see the
+README's *Updates*). For a first install or a manual download, check the archive against the
+release's SHA-256 as above. Set `Environment=PORTGLASS_NO_UPDATE_CHECK=1` in the unit to turn the
+startup check off.
+
 ## Pair a probe through the relay
 
 On the **probe** PC, either answer the relay question in the first-run setup or run:

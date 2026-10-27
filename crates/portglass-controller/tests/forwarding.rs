@@ -940,3 +940,104 @@ async fn an_invalid_config_file_fails_closed_and_recovers() {
     assert!(probe.reload_from(&path));
     assert!(ProbeLink::connect(&entry, &ctl, "t").await.is_ok());
 }
+
+/// A device front page that sends the browser to another port of the same device, like a
+/// printer console moving from http to https to sign in.
+async fn serve_redirect(listener: TcpListener, location: String) {
+    loop {
+        let Ok((mut s, _)) = listener.accept().await else {
+            return;
+        };
+        let location = location.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf).await;
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = s.write_all(reply.as_bytes()).await;
+        });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_port_a_device_redirects_to_is_forwarded_too() {
+    let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let front_port = front.local_addr().unwrap().port();
+    let h = Harness::with_extra_allow(&format!(
+        "[[allow]]\nnetwork = '127.0.0.1/32'\nports = [{front_port}]\n"
+    ))
+    .await;
+    tokio::spawn(serve_redirect(
+        front,
+        format!("http://127.0.0.1:{}/login", h.mock.port()),
+    ));
+    let ctrl = h.controller();
+    connect_ready(&ctrl, format!("127.0.0.1:{front_port}")).await;
+
+    let v = ctrl.snapshot().session.unwrap();
+    assert_eq!(v.also_forwarded.len(), 1, "{:?}", v.also_forwarded);
+    assert_eq!(v.also_forwarded[0].port, h.mock.port());
+    let redirect = v
+        .diagnostics
+        .iter()
+        .find(|d| d.title.contains("redirects to port"))
+        .expect("the redirect is reported");
+    assert!(
+        redirect.suggestion.is_none() && redirect.text.contains("forwards port"),
+        "a covered redirect needs no switch: {redirect:?}"
+    );
+
+    let extra: std::net::SocketAddr = v.also_forwarded[0].local_addr.parse().unwrap();
+    let host = format!("127.0.0.1:{}", h.mock.port());
+    let (head, body) = http(extra, &host, "GET", "/", None).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(String::from_utf8_lossy(&body).contains("MockJet 9000"));
+
+    ctrl.disconnect().await;
+    let probe_audit =
+        std::fs::read_to_string(h.dir.path().join("probe-audit.jsonl")).unwrap_or_default();
+    assert_eq!(probe_audit.matches("\"session_opened\"").count(), 2);
+    assert!(
+        TcpStream::connect(extra).await.is_err() || {
+            let mut s = TcpStream::connect(extra).await.unwrap();
+            read_eof_within(&mut s, 5).await
+        },
+        "the extra port closes with the session"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redirect_the_probe_does_not_allow_is_not_requested() {
+    let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let front_port = front.local_addr().unwrap().port();
+    let elsewhere = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let elsewhere_port = elsewhere.local_addr().unwrap().port();
+    let h = Harness::with_extra_allow(&format!(
+        "[[allow]]\nnetwork = '127.0.0.1/32'\nports = [{front_port}]\n"
+    ))
+    .await;
+    tokio::spawn(serve_redirect(
+        front,
+        format!("http://127.0.0.1:{elsewhere_port}/"),
+    ));
+    let ctrl = h.controller();
+    connect_ready(&ctrl, format!("127.0.0.1:{front_port}")).await;
+
+    let v = ctrl.snapshot().session.unwrap();
+    assert!(v.also_forwarded.is_empty(), "{:?}", v.also_forwarded);
+    assert!(
+        v.diagnostics.iter().any(|d| d
+            .suggestion
+            .as_ref()
+            .is_some_and(|s| s.port == elsewhere_port)),
+        "the technician still learns where the device wants to go: {:?}",
+        v.diagnostics
+    );
+    ctrl.disconnect().await;
+    assert!(
+        !h.audit_text().contains("session_denied"),
+        "a port the published policy rules out is never requested"
+    );
+    drop(elsewhere);
+}

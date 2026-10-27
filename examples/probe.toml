@@ -10,7 +10,7 @@ audit_log = "audit.jsonl"
 [limits]
 max_session_ttl_secs = 14400    # 4 hours; a controller may ask for less, never more
 max_streams_per_session = 32    # Chrome opens ~6 per host; WebSockets hold one each
-max_sessions = 4
+max_sessions = 8                # a technician's session uses one per web port (e.g. 80 and 443)
 stream_idle_timeout_secs = 300
 connect_timeout_secs = 5
 control_timeout_secs = 30       # silent controllers are dropped and their sessions revoked

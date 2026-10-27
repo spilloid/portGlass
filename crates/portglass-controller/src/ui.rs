@@ -55,6 +55,7 @@ pub async fn serve(ctrl: Arc<Controller>) -> anyhow::Result<UiServer> {
         .route("/api/probes/check", post(check_probes))
         .route("/api/probes/add", post(add_probe))
         .route("/api/probes/remove", post(remove_probe))
+        .route("/api/update", post(install_update))
         .layer(middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app);
     tokio::spawn(async move {
@@ -174,9 +175,14 @@ async fn check_probes(State(app): State<App>, _headers: HeaderMap, _body: Body) 
 
 #[derive(serde::Deserialize)]
 struct AddProbe {
+    /// The probe's pairing code. When present, the other fields are ignored.
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
     name: String,
     #[serde(default)]
     address: String,
+    #[serde(default)]
     fingerprint: String,
     /// Both empty: connect directly.
     #[serde(default)]
@@ -186,14 +192,21 @@ struct AddProbe {
 }
 
 async fn add_probe(State(app): State<App>, Json(req): Json<AddProbe>) -> Response {
-    match app.ctrl.add_probe(
-        &req.name,
-        &req.address,
-        &req.fingerprint,
-        (!req.relay_address.trim().is_empty() || !req.relay_fingerprint.trim().is_empty())
-            .then_some((req.relay_address.as_str(), req.relay_fingerprint.as_str())),
-    ) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+    let added = if !req.code.trim().is_empty() {
+        app.ctrl.add_probe_code(&req.code)
+    } else {
+        app.ctrl
+            .add_probe(
+                &req.name,
+                &req.address,
+                &req.fingerprint,
+                (!req.relay_address.trim().is_empty() || !req.relay_fingerprint.trim().is_empty())
+                    .then_some((req.relay_address.as_str(), req.relay_fingerprint.as_str())),
+            )
+            .map(|()| req.name.trim().to_string())
+    };
+    match added {
+        Ok(name) => Json(serde_json::json!({ "name": name })).into_response(),
         Err(f) => (StatusCode::BAD_REQUEST, Json(f)).into_response(),
     }
 }
@@ -206,6 +219,13 @@ struct RemoveProbe {
 async fn remove_probe(State(app): State<App>, Json(req): Json<RemoveProbe>) -> Response {
     match app.ctrl.remove_probe(&req.name) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(f) => (StatusCode::BAD_REQUEST, Json(f)).into_response(),
+    }
+}
+
+async fn install_update(State(app): State<App>) -> Response {
+    match app.ctrl.install_update().await {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
         Err(f) => (StatusCode::BAD_REQUEST, Json(f)).into_response(),
     }
 }

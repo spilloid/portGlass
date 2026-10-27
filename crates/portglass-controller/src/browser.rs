@@ -82,23 +82,33 @@ pub fn find_chrome(cfg: &BrowserConfig) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
+/// Whether the session browser will see the device under its own address (IPv6 literals can't be
+/// mapped with `--host-resolver-rules`).
+pub fn maps_address(cfg: &BrowserConfig, host: &str) -> bool {
+    cfg.preserve_address && !host.trim_matches(['[', ']']).contains(':')
+}
+
 /// Where the session browser should go, and how its resolver maps that onto the tunnel.
+/// `extra` maps the device's other forwarded ports to their local tunnel ports.
 pub fn plan_navigation(
     cfg: &BrowserConfig,
     scheme: Scheme,
     host: &str,
     port: u16,
     local_port: u16,
+    extra: &[(u16, u16)],
 ) -> (String, Option<String>) {
     let bare = host.trim_matches(['[', ']']);
-    let is_v6 = bare.contains(':');
-    if cfg.preserve_address && !is_v6 {
+    if maps_address(cfg, host) {
         let authority = if port == scheme.default_port() {
             bare.to_string()
         } else {
             format!("{bare}:{port}")
         };
         let mut rules = format!("MAP {bare}:{port} 127.0.0.1:{local_port}");
+        for (device_port, local) in extra {
+            rules.push_str(&format!(", MAP {bare}:{device_port} 127.0.0.1:{local}"));
+        }
         if cfg.isolation == Isolation::Strict {
             rules.push_str(", MAP * ~NOTFOUND");
         }
@@ -577,15 +587,27 @@ mod tests {
     #[test]
     fn navigation_preserves_the_device_address_and_isolates() {
         let cfg = BrowserConfig::default();
-        let (url, rules) = plan_navigation(&cfg, Scheme::Http, "192.168.1.50", 80, 54321);
+        let (url, rules) = plan_navigation(&cfg, Scheme::Http, "192.168.1.50", 80, 54321, &[]);
         assert_eq!(url, "http://192.168.1.50/");
         assert_eq!(
             rules.as_deref(),
             Some("MAP 192.168.1.50:80 127.0.0.1:54321, MAP * ~NOTFOUND")
         );
 
-        let (url, _) = plan_navigation(&cfg, Scheme::Https, "printer.lan", 8443, 5000);
+        let (url, _) = plan_navigation(&cfg, Scheme::Https, "printer.lan", 8443, 5000, &[]);
         assert_eq!(url, "https://printer.lan:8443/");
+
+        // A console that moves from http to https to sign in: both ports map, nothing else.
+        let (url, rules) =
+            plan_navigation(&cfg, Scheme::Http, "192.168.1.50", 80, 5000, &[(443, 5001)]);
+        assert_eq!(url, "http://192.168.1.50/");
+        assert_eq!(
+            rules.as_deref(),
+            Some(
+                "MAP 192.168.1.50:80 127.0.0.1:5000, MAP 192.168.1.50:443 127.0.0.1:5001, \
+                 MAP * ~NOTFOUND"
+            )
+        );
 
         // Without address mapping there are no resolver rules, whatever the isolation setting:
         // "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" would expose every loopback port to the page.
@@ -595,7 +617,14 @@ mod tests {
                 preserve_address: false,
                 ..BrowserConfig::default()
             };
-            let (url, rules) = plan_navigation(&plain, Scheme::Http, "192.168.1.50", 80, 5000);
+            let (url, rules) = plan_navigation(
+                &plain,
+                Scheme::Http,
+                "192.168.1.50",
+                80,
+                5000,
+                &[(443, 5001)],
+            );
             assert_eq!(url, "http://127.0.0.1:5000/");
             assert!(rules.is_none());
         }

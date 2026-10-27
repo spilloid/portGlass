@@ -100,3 +100,10 @@ Dated claims that no automated check covers yet (STD-003 rule 4):
 - **2026-10-25** — Relay mode is verified on loopback only (`tests/relay.rs`, plus a live run of
   the release binaries including a relay restart). No trial yet across real NAT, the internet,
   or a VPS; the Linux musl build is verified only by CI.
+- **2026-10-27** — The updater (`portglass-core::update`) is verified against a local release
+  server only. No published release has carried `portglass-manifest.json` yet; the first real
+  check is v0.4.0 → v0.4.1. The signing key's private half lives outside the repo
+  (`%USERPROFILE%\.portglass-release\update-signing-key.hex`) and must also be the `release`
+  environment's `UPDATE_SIGNING_KEY` secret, or the manifest job fails the release.
+- **2026-10-27** — Extra web ports (80 <-> 443) are verified with loopback mocks; no real printer
+  that switches to HTTPS to sign in has been tried yet.

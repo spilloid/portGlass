@@ -82,7 +82,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.meta.outputs.tag }}
           ASSET: ${{ steps.meta.outputs.asset }}
-        run: gh release upload $env:TAG $env:ASSET "$($env:ASSET).sha256" --clobber
+        run: |
+          # The raw signed binaries too: installed copies update from these (see the manifest job).
+          $v = $env:TAG.TrimStart('v')
+          $raw = foreach ($p in 'portglass', 'portglass-probe', 'portglass-relay') {
+            $name = "dist/$p-v$v-windows-x64.exe"
+            Copy-Item "dist/$p.exe" $name
+            $name
+          }
+          gh release upload $env:TAG $env:ASSET "$($env:ASSET).sha256" @raw --clobber
 
   # The macOS controller (Apple silicon). Not code-signed or notarized yet: macOS asks the
   # first time it is opened (see README). The Windows job above is unaffected by this one.
@@ -110,6 +118,8 @@ jobs:
           cargo build --release --target "$TARGET" -p portglass-controller
           mkdir -p dist/portglass
           cp "target/$TARGET/release/portglass" README.md LICENSE CHANGELOG.md SECURITY.md dist/portglass/
+          cp "target/$TARGET/release/portglass" "dist/portglass-$TAG-macos-arm64"
+          echo "RAW=dist/portglass-$TAG-macos-arm64" >> "$GITHUB_ENV"
           asset="portglass-$TAG-macos-arm64.tar.gz"
           tar -C dist -czf "dist/$asset" portglass
           (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
@@ -117,7 +127,7 @@ jobs:
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber "$RAW"
   # The relay, for a Linux server both sides can reach (a small VPS is enough). A static musl
   # binary, so it runs on any distribution. Not code-signed: Linux has no Authenticode; verify it
   # with the published SHA-256.
@@ -147,6 +157,8 @@ jobs:
           mkdir -p dist/portglass-relay
           cp "target/$TARGET/release/portglass-relay" README.md LICENSE CHANGELOG.md SECURITY.md \
              docs/relay.md examples/relay.toml examples/portglass-relay.service dist/portglass-relay/
+          cp "target/$TARGET/release/portglass-relay" "dist/portglass-relay-$TAG-linux-x64"
+          echo "RAW=dist/portglass-relay-$TAG-linux-x64" >> "$GITHUB_ENV"
           asset="portglass-relay-$TAG-linux-x64.tar.gz"
           tar -C dist -czf "dist/$asset" portglass-relay
           (cd dist && sha256sum "$asset" > "$asset.sha256")
@@ -154,4 +166,41 @@ jobs:
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber "$RAW"
+
+  # Last: the signed manifest installed copies trust for updates. Runs only when every platform
+  # job succeeded, so a release missing a platform never offers itself as an update. The manifest
+  # is verified with the public keys compiled into this very release before it is uploaded.
+  manifest:
+    name: Sign the update manifest
+    needs: [build, macos, linux-relay]
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+      - name: Download the raw binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p manifest
+          gh release download "$TAG" --dir manifest \
+            --pattern "portglass-$TAG-*" --pattern "portglass-probe-$TAG-*" \
+            --pattern "portglass-relay-$TAG-*"
+          rm -f manifest/*.zip manifest/*.tar.gz manifest/*.sha256
+          ls -l manifest
+      - name: Build, sign and verify the manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          [ -n "$UPDATE_SIGNING_KEY" ] || { echo "UPDATE_SIGNING_KEY is not set in the release environment; releases are never unsigned"; exit 1; }
+          cargo run --release -q -p portglass-release -- manifest --version "${TAG#v}" --dir manifest
+          cargo run --release -q -p portglass-release -- sign --dir manifest
+          cargo run --release -q -p portglass-release -- verify --dir manifest
+      - name: Upload the manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" manifest/portglass-manifest.json manifest/portglass-manifest.json.sig --clobber
