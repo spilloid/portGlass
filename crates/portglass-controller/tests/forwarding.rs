@@ -1041,3 +1041,31 @@ async fn a_redirect_the_probe_does_not_allow_is_not_requested() {
     );
     drop(elsewhere);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_only_the_extra_port_ends_the_whole_session() {
+    let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let front_port = front.local_addr().unwrap().port();
+    let h = Harness::with_extra_allow(&format!(
+        "[[allow]]\nnetwork = '127.0.0.1/32'\nports = [{front_port}]\n"
+    ))
+    .await;
+    tokio::spawn(serve_redirect(
+        front,
+        format!("http://127.0.0.1:{}/", h.mock.port()),
+    ));
+    let ctrl = h.controller();
+    connect_ready(&ctrl, format!("127.0.0.1:{front_port}")).await;
+    assert_eq!(ctrl.snapshot().session.unwrap().also_forwarded.len(), 1);
+
+    // The administrator keeps the front port but withdraws the one the device redirects to.
+    let cfg = probe_config(&h.ctl_id, &[front_port], "", h.dir.path());
+    h.probe().apply_config(cfg);
+    let s = wait_for(&ctrl, |s| s.phase == Phase::Failed).await;
+    assert_eq!(s.failure.unwrap().kind, FailureKind::SessionRevoked);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while h.probe().active_sessions() != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(h.probe().active_sessions(), 0, "both grants are closed");
+}

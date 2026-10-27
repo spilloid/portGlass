@@ -370,8 +370,9 @@ function portList(spec) {
   const out = [];
   for (const part of String(spec).split(",")) {
     const [lo, hi] = part.trim().split("-").map((x) => parseInt(x, 10));
-    if (Number.isInteger(lo) && hi === undefined) out.push(lo);
-    else if (Number.isInteger(lo) && Number.isInteger(hi) && hi - lo < 4096) for (let p = lo; p <= hi; p++) out.push(p);
+    const ok = (n) => Number.isInteger(n) && n >= 1 && n <= 65535;
+    if (ok(lo) && hi === undefined) out.push(lo);
+    else if (ok(lo) && ok(hi) && hi >= lo && hi - lo < 4096) for (let p = lo; p <= hi; p++) out.push(p);
   }
   return out;
 }

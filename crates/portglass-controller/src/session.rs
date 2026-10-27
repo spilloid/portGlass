@@ -232,8 +232,8 @@ pub struct Controller {
     options: Options,
     /// Pinned probes. Editable from the window; saved back to `config.source`.
     probes: Mutex<Vec<ProbeEntry>>,
-    /// The newer release found at startup, ready to install on request.
-    pending_update: Mutex<Option<update::Available>>,
+    /// Set while an update installs (and until the restart), so no session can start.
+    updating: std::sync::atomic::AtomicBool,
     restart: tokio::sync::Notify,
 }
 
@@ -332,7 +332,7 @@ impl Controller {
             state,
             active: tokio::sync::Mutex::new(None),
             options,
-            pending_update: Mutex::new(None),
+            updating: std::sync::atomic::AtomicBool::new(false),
             restart: tokio::sync::Notify::new(),
         })
     }
@@ -526,6 +526,14 @@ impl Controller {
     /// Start a session. Returns an error if one is already active or the request is invalid.
     pub async fn connect(self: &Arc<Self>, req: ConnectRequest) -> Result<(), Failure> {
         let mut active = self.active.lock().await;
+        if self.updating.load(Ordering::SeqCst) {
+            return Err(Failure::new(
+                FailureKind::Busy,
+                "PortGlass is updating",
+                "It restarts when the update is installed.",
+                "Connect after the restart.",
+            ));
+        }
         if let Some(a) = active.as_ref() {
             if !a.task.is_finished() {
                 return Err(Failure::new(
@@ -656,7 +664,6 @@ impl Controller {
         .flatten();
         if let Some(a) = found {
             let version = a.version.clone();
-            *self.pending_update.lock().unwrap() = Some(a);
             self.update(|s| {
                 s.update = Some(UpdateView {
                     version,
@@ -667,24 +674,30 @@ impl Controller {
         }
     }
 
-    /// Install the release found at startup, then ask the program to restart into it. Refused
-    /// while a session is open, so an update never cuts a technician off mid-task.
+    /// Install the newest signed release, then ask the program to restart into it. Refused while
+    /// a session is open, and no session can start while it runs, so an update never cuts a
+    /// technician off mid-task.
     pub async fn install_update(self: &Arc<Self>) -> Result<(), Failure> {
-        let busy = !matches!(
-            self.state.borrow().phase,
-            Phase::Disconnected | Phase::Failed
-        );
-        if busy {
-            return Err(Failure::new(
-                FailureKind::Busy,
-                "A session is open",
-                "PortGlass restarts to finish an update.",
-                "End the session first, then update.",
-            ));
+        {
+            // Reserved under the same lock connect() takes, so neither can slip past the other.
+            let active = self.active.lock().await;
+            if active.as_ref().is_some_and(|a| !a.task.is_finished()) {
+                return Err(Failure::new(
+                    FailureKind::Busy,
+                    "A session is open",
+                    "PortGlass restarts to finish an update.",
+                    "End the session first, then update.",
+                ));
+            }
+            if self.updating.swap(true, Ordering::SeqCst) {
+                return Err(Failure::new(
+                    FailureKind::Busy,
+                    "The update is already being installed",
+                    "One install at a time.",
+                    "Wait for it to finish.",
+                ));
+            }
         }
-        let Some(available) = self.pending_update.lock().unwrap().clone() else {
-            return Err(Failure::internal("there is no update to install"));
-        };
         let set = |state, message: Option<String>| {
             self.update(|s| {
                 if let Some(u) = &mut s.update {
@@ -694,24 +707,37 @@ impl Controller {
             })
         };
         set(UpdateState::Installing, None);
-        let result = tokio::task::spawn_blocking(move || update::apply(&available))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            .and_then(|r| r);
+        // Asked again now rather than trusting what startup found: another copy of PortGlass may
+        // have installed something newer since, and this must never step backwards.
+        let result = tokio::task::spawn_blocking(|| {
+            match update::check("portglass", env!("CARGO_PKG_VERSION"))? {
+                Some(available) => update::apply(&available).map(Some),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .and_then(|r| r);
         match result {
-            Ok(_) => {
+            Ok(Some(_)) => {
                 set(UpdateState::Installed, None);
                 self.restart.notify_one();
                 Ok(())
             }
+            Ok(None) => {
+                self.updating.store(false, Ordering::SeqCst);
+                self.update(|s| s.update = None);
+                Ok(())
+            }
             Err(e) => {
+                self.updating.store(false, Ordering::SeqCst);
                 let text = format!("{e:#}");
                 set(UpdateState::Failed, Some(text.clone()));
                 Err(Failure::new(
                     FailureKind::Internal,
                     "The update wasn't installed",
                     text,
-                    "Nothing was changed. Try again later, or download the release by hand.",
+                    "Try again later, or download the release by hand.",
                 ))
             }
         }
@@ -841,6 +867,9 @@ impl Controller {
             Err(f) => return self.fail(f, Some(&link)).await,
         };
         let granted_at = Instant::now();
+        // Subscribed now, so an end of any of this session's grants announced while the rest
+        // is still being set up is not missed.
+        let events = link.subscribe();
         self.set_session(|v| {
             v.id = grant.session_id.clone();
             v.resolved = Some(grant.resolved_addr.clone());
@@ -874,10 +903,20 @@ impl Controller {
         // their own, so signing in over https works. Each is approved by the probe's policy like
         // any session; one the probe refuses is simply left out.
         let mut extras: Vec<(u16, SessionGrant, TcpListener)> = Vec::new();
-        if browser::maps_address(&self.config.browser, &target.host) {
+        // Extra ports go to the address the probe pinned for this session, never a fresh lookup
+        // of the name, so they can't land on a different machine.
+        let pinned_ip = grant
+            .resolved_addr
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|a| a.ip());
+        if let (true, Some(pinned_ip)) = (
+            browser::maps_address(&self.config.browser, &target.host),
+            pinned_ip,
+        ) {
             for port in extra_ports(&target, &report, &link.hello.policy) {
                 let spec = TargetSpec {
-                    host: target.host.clone(),
+                    host: pinned_ip.to_string(),
                     port,
                 };
                 let opened = tokio::select! {
@@ -896,6 +935,14 @@ impl Controller {
                         continue;
                     }
                 };
+                let same_machine = g
+                    .resolved_addr
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|a| a.ip() == pinned_ip);
+                if !same_machine {
+                    link.close_session(&g.session_id).await;
+                    continue;
+                }
                 match TcpListener::bind(("127.0.0.1", 0)).await {
                     Ok(l) => extras.push((port, g, l)),
                     Err(_) => link.close_session(&g.session_id).await,
@@ -1054,6 +1101,7 @@ impl Controller {
                 &link,
                 &grant,
                 &extra_grants,
+                events,
                 &stats,
                 &cancel,
                 &mut cmds,
@@ -1184,6 +1232,7 @@ impl Controller {
         link: &Arc<ProbeLink>,
         grant: &SessionGrant,
         extra_grants: &[SessionGrant],
+        mut events: tokio::sync::broadcast::Receiver<ControlEvent>,
         stats: &Arc<Stats>,
         cancel: &CancellationToken,
         cmds: &mut mpsc::Receiver<Cmd>,
@@ -1192,7 +1241,6 @@ impl Controller {
         url: &str,
         rules: Option<&str>,
     ) -> End {
-        let mut events = link.subscribe();
         let closed = link.closed();
         let (ping_tx, mut ping_rx) = mpsc::channel::<Option<u32>>(4);
         {
@@ -1261,7 +1309,13 @@ impl Controller {
                         });
                     }
                     Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    // A missed event could have been the end of one of our grants: don't guess.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => return End::Failed(Failure::new(
+                        FailureKind::NetworkInterrupted,
+                        "Lost track of the probe's messages",
+                        "Too many arrived at once to be sure the session is intact.",
+                        "Connect again.",
+                    )),
                     Err(_) => return End::Failed(Failure::new(
                         FailureKind::NetworkInterrupted,
                         "The connection to the probe was lost",

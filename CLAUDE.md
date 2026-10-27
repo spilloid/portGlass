@@ -10,7 +10,11 @@ Read [`docs/architecture.md`](docs/architecture.md) and
 
 ## Product rules that override convenience
 
-- **Expose one explicitly authorized TCP service, not a network.** No SOCKS/HTTP proxy, no
+- **Expose one explicitly authorized device, not a network.** A session may also carry that
+  device's web partner port (80/443, 8080/8443) and ports it redirects to, at most two, each a
+  probe-approved session pinned to the main session's IP (operator decision 2026-10-27, so
+  sign-in over HTTPS works; Sol flagged it against the older one-service rule). Never a second
+  device, never a port the probe's policy refuses. No SOCKS/HTTP proxy, no
   routing, DNS, virtual adapters or packet capture.
 - **The probe's capability stays minimal and obvious.** Its command surface is
   `ControlRequest` (open / check / close / ping). Never add execution, file transfer, scanning,

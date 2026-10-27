@@ -11,7 +11,7 @@ everything the browser stored.
 
 ![The PortGlass window while connected](docs/img/controller-connected-dark.png)
 
-> **Guiding principle: expose one explicitly authorized TCP service, not an entire network.**
+> **Guiding principle: expose one explicitly authorized device, not an entire network.**
 
 ## How it works
 

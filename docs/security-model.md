@@ -173,7 +173,10 @@ process command line — same-user processes are inside the trust boundary on Wi
 - A probe registers with at most one relay.
 - One device per session. Its web partner port (80/443, 8080/8443) and same-device redirect
   targets ride along as extra probe sessions when the probe's policy allows them (at most two);
-  any other port needs its own session.
+  any other port needs its own session. Extra ports are opened against the IP the probe
+  pinned for the main session, so they always reach the same machine. A device can choose which
+  of its own allowed ports come along by redirecting to them; write allow rules for the ports you
+  mean, not wide ranges.
 - Private keys are ACL-protected files, not DPAPI/TPM-backed.
 - No Windows service mode; the probe runs in a visible console.
 - The probe's listener exposes TLS on one port to whatever the firewall allows.

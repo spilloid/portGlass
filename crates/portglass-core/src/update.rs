@@ -135,7 +135,10 @@ fn base() -> String {
 }
 
 fn agent() -> ureq::Agent {
+    // The signature is what makes a download trustworthy, but nothing should quietly drop to
+    // plain HTTP either: an https base refuses any redirect that leaves https.
     ureq::AgentBuilder::new()
+        .https_only(base().starts_with("https://"))
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(300))
         .user_agent(concat!("PortGlass/", env!("CARGO_PKG_VERSION")))
@@ -224,29 +227,86 @@ pub fn install(body: &[u8], file: &ManifestFile, target: &Path) -> Result<()> {
         p.push(ext);
         PathBuf::from(p)
     };
-    let new = sibling(".new");
+    // A name of its own, so two copies updating at once never write the same staging file.
+    let new = sibling(&format!(".new-{}", hex::encode(crate::random_bytes::<6>())));
     let old = sibling(".old");
-    std::fs::write(&new, body).with_context(|| {
-        format!(
-            "writing next to {} (an administrator install needs an administrator to update it)",
-            target.display()
-        )
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))?;
-    }
-    let _ = std::fs::remove_file(&old);
-    // Windows can't overwrite a running .exe, but it can rename one.
-    if let Err(e) = std::fs::rename(target, &old) {
+    let staged = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&new)?;
+        f.write_all(body)?;
+        // On disk before it is put in place, so a power cut can't leave a half-written program.
+        f.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = staged {
         let _ = std::fs::remove_file(&new);
-        return Err(e).with_context(|| format!("moving {} aside", target.display()));
+        return Err(e).with_context(|| {
+            format!(
+                "writing next to {} (an administrator install needs an administrator to update \
+                 it); nothing was changed",
+                target.display()
+            )
+        });
     }
-    if let Err(e) = std::fs::rename(&new, target) {
-        let _ = std::fs::rename(&old, target);
-        let _ = std::fs::remove_file(&new);
-        return Err(e).with_context(|| format!("putting the new {} in place", target.display()));
+    swap(&new, &old, target)
+}
+
+/// Unix: keep a copy as `.old`, then one atomic rename over the program. There is no moment
+/// without a program at `target`.
+#[cfg(unix)]
+fn swap(new: &Path, old: &Path, target: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(old);
+    if let Err(e) = std::fs::copy(target, old) {
+        let _ = std::fs::remove_file(new);
+        return Err(e).with_context(|| format!("keeping a copy of {}", target.display()));
+    }
+    if let Err(e) = std::fs::rename(new, target) {
+        let _ = std::fs::remove_file(new);
+        return Err(e).with_context(|| {
+            format!(
+                "putting the new {} in place; nothing was changed",
+                target.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Windows can't replace a running .exe, but it can rename it: move it aside, then move the new
+/// one in. If the second step fails the first is undone, and if *that* fails the error says where
+/// the program now is rather than claiming nothing changed.
+#[cfg(not(unix))]
+fn swap(new: &Path, old: &Path, target: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(old);
+    if let Err(e) = std::fs::rename(target, old) {
+        let _ = std::fs::remove_file(new);
+        return Err(e)
+            .with_context(|| format!("moving {} aside; nothing was changed", target.display()));
+    }
+    if let Err(e) = std::fs::rename(new, target) {
+        let _ = std::fs::remove_file(new);
+        return match std::fs::rename(old, target) {
+            Ok(()) => Err(e).with_context(|| {
+                format!(
+                    "putting the new {} in place; the previous version was restored",
+                    target.display()
+                )
+            }),
+            Err(restore) => Err(e).with_context(|| {
+                format!(
+                    "putting the new {} in place, and restoring the previous version failed \
+                     ({restore}). Rename {} back to {} to repair it",
+                    target.display(),
+                    old.display(),
+                    target.display()
+                )
+            }),
+        };
     }
     Ok(())
 }
@@ -400,13 +460,22 @@ mod tests {
 
         assert!(install(b"evil build", &m.files[0], &target).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"old build");
-        assert!(!dir.path().join("portglass-relay.new").exists());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no staging file left"
+        );
 
         install(&good, &m.files[0], &target).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), good);
         assert_eq!(
             std::fs::read(dir.path().join("portglass-relay.old")).unwrap(),
             b"old build"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            2,
+            "only the program and .old"
         );
     }
 
