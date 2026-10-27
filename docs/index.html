@@ -49,6 +49,11 @@ h2 { font-size: 30px; margin: 0 0 10px; letter-spacing: -.3px; }
 pre { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow-x: auto; font: 14px/1.55 var(--mono); }
 .not li { margin: 4px 0; }
 footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--line); }
+.new { padding: 36px 0 40px; }
+.new .eyebrow { margin: 0 0 18px; font-size: 12px; font-weight: 700; letter-spacing: 1.6px; text-transform: uppercase; color: var(--accent); }
+.new h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.new p { margin: 0; color: var(--muted); font-size: 15px; }
+.new .grid3 > div { padding-left: 16px; border-left: 2px solid var(--line); }
 @media (max-width: 860px) { .hero { grid-template-columns: 1fr; } .grid3 { grid-template-columns: 1fr; } .states { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 480px) { .states { grid-template-columns: 1fr; } nav .links { gap: 12px; } }
 </style>
@@ -67,8 +72,8 @@ footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top:
   <div class="hero">
     <div>
       <h1>One remote web interface. Nothing else.</h1>
-      <p class="lead">Pick a probe, type the device's address, and a dedicated browser opens on its real admin page — as if it were on your desk. No VPN, no remote desktop, no routing a whole network.</p>
-      <div class="typed">192.168.1.50:80<span class="caret"></span></div>
+      <p class="lead">Pick a device and its real admin page opens in a dedicated browser, as if it were on your desk. No VPN, no remote desktop, no routing a whole network.</p>
+      <div class="typed">192.168.1.50<span class="caret"></span></div>
       <div class="cta">
         <a class="btn primary" href="https://github.com/spilloid/portGlass/releases/latest">Download for Windows</a>
         <a class="btn" href="#start">How to start</a>
@@ -80,13 +85,24 @@ footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top:
   </div>
 </div>
 
+<section id="new" class="new">
+  <div class="wrap">
+    <p class="eyebrow">New in 0.4</p>
+    <div class="grid3">
+      <div><h3>Follows the device to HTTPS</h3><p>Consoles that switch to https to sign in just work. Each port still needs the probe's approval.</p></div>
+      <div><h3>Pair in one paste</h3><p>The probe prints a pairing code. Paste it once, then open its devices with a click.</p></div>
+      <div><h3>Updates you can verify</h3><p>Every release is signed. PortGlass tells you when there's a new one and installs only when you ask.</p></div>
+    </div>
+  </div>
+</section>
+
 <section id="how">
   <div class="wrap">
     <h2>How it works</h2>
-    <p class="sub">A small probe on a computer at the remote site forwards one TCP port to one approved address, for you only, for a limited time. Everything between you and the probe is TLS 1.3 with both sides' certificates pinned.</p>
+    <p class="sub">A small probe on a computer at the remote site forwards one approved device's web ports to you alone, for a limited time. Everything between you and the probe is TLS 1.3 with both sides' certificates pinned.</p>
     <div class="grid3">
       <div class="card"><h3>1 · Authenticate</h3><p>Your controller and the probe prove who they are with certificates whose fingerprints each side pinned in advance — like SSH keys.</p></div>
-      <div class="card"><h3>2 · Ask for one target</h3><p>The probe checks the address and port against its own allowlist, pins the address, and test-connects before granting a session.</p></div>
+      <div class="card"><h3>2 · Ask for one device</h3><p>The probe checks the address and each port against its own allowlist, pins the address, and test-connects before granting a session.</p></div>
       <div class="card"><h3>3 · Browse it</h3><p>Your installed Chrome opens with a brand-new profile, pointed at the device's own address through the tunnel. Close it and everything is deleted.</p></div>
     </div>
   </div>
@@ -119,6 +135,7 @@ footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top:
       <li>No command execution, file transfer, scanning, or persistence in the probe.</li>
       <li>No proxy, route, DNS or certificate changes; no virtual adapters.</li>
       <li>Never your personal browser profile, and never a weakened browser.</li>
+      <li>Never updates itself without asking, and never installs a release it can't verify.</li>
     </ul>
   </div>
 </section>
@@ -129,10 +146,10 @@ footer { padding: 32px 0 48px; color: var(--muted); font-size: 14px; border-top:
     <p class="sub">You need Google Chrome on your PC and a Windows computer at the site. No installer, no admin rights.</p>
     <div class="grid3">
       <div class="card"><h3>1 · Open PortGlass</h3><p>Unzip the <a href="https://github.com/spilloid/portGlass/releases/latest">download</a> and double-click <b>portglass.exe</b>. It shows your fingerprint under <i>Add a probe</i>.</p></div>
-      <div class="card"><h3>2 · Start the probe</h3><p>At the site, double-click <b>portglass-probe.exe</b>. Paste your fingerprint and the device to allow, like 192.168.1.50:80. It prints its name, address and fingerprint.</p></div>
-      <div class="card"><h3>3 · Pair and connect</h3><p>Enter those in PortGlass, press <b>Add probe</b>, type the device address and press <b>Connect</b>. The device's page opens.</p></div>
+      <div class="card"><h3>2 · Start the probe</h3><p>At the site, double-click <b>portglass-probe.exe</b>. Paste your fingerprint and the device to allow, like 192.168.1.50. It prints a pairing code.</p></div>
+      <div class="card"><h3>3 · Pair and open</h3><p>Paste the code into PortGlass and press <b>Add probe</b>. Click the device. Its page opens.</p></div>
     </div>
-    <img class="shot" style="margin:28px auto 0;display:block" src="img/controller-firstrun-dark.png" alt="First run: the Add a probe card with your fingerprint and a form for the probe's details" loading="lazy">    <p class="sub" style="margin-top:24px">Prefer a terminal or a managed install? Every step has a command, and the probe has an administrator install script.
+    <img class="shot" style="margin:28px auto 0;display:block" src="img/controller-firstrun-dark.png" alt="First run: the Add a probe card with your fingerprint and a box for the probe's pairing code" loading="lazy">    <p class="sub" style="margin-top:24px">Prefer a terminal or a managed install? Every step has a command, and the probe has an administrator install script.
       Docs: <a href="https://github.com/spilloid/portGlass/blob/main/docs/architecture.md">architecture</a> ·
       <a href="https://github.com/spilloid/portGlass/blob/main/docs/security-model.md">security model</a> ·
       <a href="https://github.com/spilloid/portGlass/blob/main/docs/deployment.md">deployment, firewall &amp; EDR</a> ·
