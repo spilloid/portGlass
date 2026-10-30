@@ -34,7 +34,8 @@ everything the browser stored.
   Chrome with a brand-new profile pointed at the device's own address.
 
 Details: [architecture](docs/architecture.md) · [security model and threat analysis](docs/security-model.md)
-· [deployment, firewall and EDR guidance](docs/deployment.md) · [troubleshooting](docs/troubleshooting.md).
+· [deployment, firewall and EDR guidance](docs/deployment.md) · [troubleshooting](docs/troubleshooting.md)
+· [revoking a lost technician PC](docs/revocation.md).
 
 ### Not on the same network: the relay
 
@@ -99,7 +100,7 @@ The demo creates throwaway identities under `%TEMP%`, starts a mock printer inte
 | | |
 |---|---|
 | **Secure single-port bridge** | Raw TCP, binary-safe, both directions at once, with backpressure and half-close. HTTP, HTTPS and WebSockets work unmodified. Many concurrent connections to the one authorized target. |
-| **Dedicated browser** | Your installed Chrome, a fresh profile per session in `%LOCALAPPDATA%\PortGlass\browser-sessions`, deleted when the session ends. Never your personal profile, no system proxy, no global settings. |
+| **Dedicated browser** | Your installed Chrome, a fresh profile per session in `%LOCALAPPDATA%\PortGlass\browser-sessions`, deleted when the session ends (after a controller crash, at the next start; see [limitations](#known-limitations-v040)). Never your personal profile, no system proxy, no global settings. |
 | **The device's own address** | The session window shows `http://192.168.1.50/`, mapped onto the tunnel inside that window only, so Host checks, cookies and same-port redirects behave as on the device's LAN. In strict isolation nothing else resolves. |
 | **Genuine status** | Red · amber · green · gray, driven by the session state machine, heartbeats, and the probe test-connecting to the device every 10 seconds. |
 | **http and https together** | A session also carries the device's other web port (80 ↔ 443, 8080 ↔ 8443, or wherever it redirects) when the probe allows it, so consoles that switch to HTTPS to sign in just work. Each port is its own probe-approved session. |
@@ -155,7 +156,11 @@ Examples of every configuration file: [`examples/`](examples/).
 - **Chrome shows a notice about `--host-resolver-rules`.** That is the per-window address mapping;
   PortGlass never hides it. Set `preserve_address = false` to avoid the flag (see
   [security model](docs/security-model.md#browser-address-mapping)).
-- **No Windows service yet.** The probe runs in a visible console by design for v0.1.0.
+- **A controller crash leaves the session profile on disk** until PortGlass next starts and sweeps
+  it. The tunnel closes with the controller either way. On Windows the Job Object also closes the
+  session Chrome; **on macOS it keeps running** until you close it, because there are no job
+  objects to end it.
+- **No Windows service yet.** The probe runs in a visible console by design.
 - **Signed Windows binaries only.** Windows release builds are Authenticode-signed. The macOS
   controller is not notarized. Every release also carries an Ed25519-signed manifest that the
   built-in updater checks (see [Updates](#updates)); releases before v0.4.0 have no updater.

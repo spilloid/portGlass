@@ -177,6 +177,8 @@ process command line — same-user processes are inside the trust boundary on Wi
   pinned for the main session, so they always reach the same machine. A device can choose which
   of its own allowed ports come along by redirecting to them; write allow rules for the ports you
   mean, not wide ranges.
+- A controller crash leaves the session profile on disk until the next controller start sweeps it.
+  On macOS the session Chrome also survives the crash (no job objects); the tunnel does not.
 - Private keys are ACL-protected files, not DPAPI/TPM-backed.
 - No Windows service mode; the probe runs in a visible console.
 - The probe's listener exposes TLS on one port to whatever the firewall allows.
