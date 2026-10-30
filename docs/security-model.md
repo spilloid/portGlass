@@ -179,6 +179,12 @@ process command line — same-user processes are inside the trust boundary on Wi
   mean, not wide ranges.
 - A controller crash leaves the session profile on disk until the next controller start sweeps it.
   On macOS the session Chrome also survives the crash (no job objects); the tunnel does not.
+  On macOS a helper that calls `setsid()` (Chrome's crash handler does) leaves the process group
+  and is not killed with it (#13).
+- Profile deletion is best effort: a locked file leaves data behind while the window still
+  reports it deleted (#14). Downloads go to the user's Downloads folder and are never deleted
+  (#16). A managed Chrome `UserDataDir` policy overrides the per-session profile (#15).
+- macOS admission runs one unbounded `lsof` per connection; a local process can flood it (#12).
 - Private keys are ACL-protected files, not DPAPI/TPM-backed.
 - No Windows service mode; the probe runs in a visible console.
 - The probe's listener exposes TLS on one port to whatever the firewall allows.

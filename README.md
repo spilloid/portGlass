@@ -160,6 +160,12 @@ Examples of every configuration file: [`examples/`](examples/).
   it. The tunnel closes with the controller either way. On Windows the Job Object also closes the
   session Chrome; **on macOS it keeps running** until you close it, because there are no job
   objects to end it.
+- **Deleting the session's browser data is best effort.** If a file stays locked, PortGlass logs a
+  warning but the window still says the data was deleted ([#14](https://github.com/spilloid/portGlass/issues/14)).
+  **Downloads** (a device's exported config, say) go to your normal Downloads folder and are never
+  deleted ([#16](https://github.com/spilloid/portGlass/issues/16)). If your organization sets
+  Chrome's `UserDataDir` policy, it overrides the fresh profile and the session's data stays in
+  the policy's folder ([#15](https://github.com/spilloid/portGlass/issues/15)).
 - **No Windows service yet.** The probe runs in a visible console by design.
 - **Signed Windows binaries only.** Windows release builds are Authenticode-signed. The macOS
   controller is not notarized. Every release also carries an Ed25519-signed manifest that the
