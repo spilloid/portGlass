@@ -83,7 +83,7 @@ jobs:
 
   macos:
     name: Build, lint, test (macOS arm64 controller)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       TARGET: aarch64-apple-darwin
