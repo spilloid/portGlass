@@ -6,8 +6,8 @@ desktop, or routing a whole network.**
 PortGlass v0.4.0 · Windows, and macOS (Apple silicon) for the technician · relay for Linux · MIT · [Docs site](https://spilloid.github.io/portGlass/)
 
 A technician picks a probe, types `192.168.1.50:80`, and a dedicated, isolated browser window
-opens on the printer's real web interface. Closing the session closes the tunnel and deletes
-everything the browser stored.
+opens on the printer's real web interface. Closing the session closes the tunnel and deletes the session's browser profile (with
+exceptions, such as downloads and controller crashes: see [Known limitations](#known-limitations-v040)).
 
 ![The PortGlass window while connected](docs/img/controller-connected-dark.png)
 
